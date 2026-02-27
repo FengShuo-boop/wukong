@@ -103,7 +103,7 @@ class PerTokenSparseMoE(Layer):
         self.num_D = int(num_D)
         self.expansion_ratio = int(expansion_ratio)
         self.num_experts = int(num_experts)
-        self.dropout = float(dropout)
+        self.dropout = Dropout(dropout)
         self.l1_coef = float(l1_coef)
         self.sparsity_ratio = float(sparsity_ratio) if sparsity_ratio else 1.0
         self.use_dtsi = bool(use_dtsi)
@@ -169,10 +169,10 @@ class PerTokenSparseMoE(Layer):
         h = tf.einsum("btd,tedh->bteh", x, self.W1) + self.b1
         h = gelu(h)
         if self.dropout and training:
-            h = tf.nn.dropout(h, keep_prob=1.0 - self.dropout)
+            h = self.dropout(h, training=training)
         expert_out = tf.einsum("bteh,tehd->bted", h, self.W2) + self.b2
         if self.dropout and training:
-            expert_out = tf.nn.dropout(expert_out, keep_prob=1.0 - self.dropout)
+            expert_out = self.dropout(expert_out, training=training)
 
         gate_train_logits = self._router_logits(x, self.gate_w_train, self.gate_b_train)
         if self.routing_type == "relu_dtsi":
