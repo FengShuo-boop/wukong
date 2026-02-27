@@ -99,7 +99,7 @@ NUM_TOKENS = 16  # number of tokens after semantic tokenization (T in the paper)
 NUM_HEADS = (
     16  # number of attention heads in the token mixer（H in the paper）H must same as T
 )
-EXPANSION_RATIO = 8  # expansion ratio for the per-token FFN in RankMixerLayer
+EXPANSION_RATIO = 4  # expansion ratio for the per-token FFN in RankMixerLayer
 NUM_HIDDEN_HEAD = 2  # number of hidden layers in the final prediction head MLPs
 DIM_HIDDEN_HEAD = 256  # dimension of hidden layers in the final prediction head
 DROPOUT = 0.5  # dropout rate
