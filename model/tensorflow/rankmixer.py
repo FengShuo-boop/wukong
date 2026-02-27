@@ -1,6 +1,12 @@
 from typing import List
 import tensorflow as tf
-from tensorflow.keras.layers import Dense, Layer, Activation, LayerNormalization
+from tensorflow.keras.layers import (
+    Dense,
+    Layer,
+    Activation,
+    LayerNormalization,
+    Dropout,
+)
 
 from model.tensorflow.embedding import Embedding
 from model.tensorflow.mlp import MLP
@@ -37,7 +43,7 @@ class TokenMixer(Layer):
 
 
 class PerTokenFFN(Layer):
-    def __init__(self, num_T, num_D, expansion_ratio=4, **kwargs):
+    def __init__(self, num_T, num_D, expansion_ratio=4, dropout=0.0, **kwargs):
         super().__init__(**kwargs)
 
         # 每个expert的FFN
@@ -47,6 +53,7 @@ class PerTokenFFN(Layer):
                 [
                     Dense(num_D * expansion_ratio, name=f"expert_{i}_fc1"),
                     Activation("gelu"),
+                    Dropout(dropout, name=f"expert_{i}_dropout"),
                     Dense(num_D, name=f"expert_{i}_fc2"),
                 ]
             )
@@ -192,13 +199,19 @@ class PerTokenSparseMoE(Layer):
 
 
 class RankMixerLayer(Layer):
-    def __init__(self, num_T, num_D, num_H, expansion_ratio, use_moe=False, **kwargs):
+    def __init__(
+        self, num_T, num_D, num_H, expansion_ratio, use_moe=False, dropout=0.0, **kwargs
+    ):
         super().__init__(**kwargs)
         self.token_mixer = TokenMixer(num_T, num_D, num_H)
         if use_moe:
-            self.per_token_ffn = PerTokenSparseMoE(num_T, num_D, expansion_ratio)
+            self.per_token_ffn = PerTokenSparseMoE(
+                num_T, num_D, expansion_ratio, dropout=dropout
+            )
         else:
-            self.per_token_ffn = PerTokenFFN(num_T, num_D, expansion_ratio)
+            self.per_token_ffn = PerTokenFFN(
+                num_T, num_D, expansion_ratio, dropout=dropout
+            )
         self.norm1 = LayerNormalization(epsilon=1e-6)
         self.norm2 = LayerNormalization(epsilon=1e-6)
 
@@ -242,7 +255,13 @@ class RankMixer(Layer):
         for i in range(num_layers):
             self.layers_list.append(
                 RankMixerLayer(
-                    num_tokens, dim_emb, num_heads, expansion_ratio, use_moe=0 == i % 2
+                    num_tokens,
+                    dim_emb,
+                    num_heads,
+                    expansion_ratio,
+                    use_moe=0 == i % 2,
+                    dropout=dropout,
+                    name=f"rankmixer_layer_{i}",
                 )
             )
         self.projection_head = MLP(
