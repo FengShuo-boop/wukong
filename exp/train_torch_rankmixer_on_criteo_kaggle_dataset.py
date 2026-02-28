@@ -11,7 +11,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 
-from model.pytorch.wukong import Wukong
+from model.pytorch.rankmixer import RankMixer
 from data.pytorch.criteo_kaggle_dataset import CriteoDataset
 
 ####################################################################################################
@@ -115,13 +115,13 @@ DIM_OUTPUT = 1
 ####################################################################################################
 #                                   MODEL SPECIFIC CONFIGURATION                                   #
 ####################################################################################################
-NUM_LAYERS = 8
+NUM_LAYERS = 6
 DIM_EMB = 128
-NUM_EMB_LCB = 32
-NUM_EMB_FMB = 32
-RANK_FMB = 24
-NUM_HIDDEN_WUKONG = 3
-DIM_HIDDEN_WUKONG = 2048
+NUM_TOKENS = 16  # number of tokens after semantic tokenization (T in the paper)
+NUM_HEADS = (
+    16  # number of attention heads in the token mixer（H in the paper）H must same as T
+)
+EXPANSION_RATIO = 4  # expansion ratio for the per-token FFN in RankMixerLayer
 NUM_HIDDEN_HEAD = 2
 DIM_HIDDEN_HEAD = 256
 DROPOUT = 0.5
@@ -145,17 +145,15 @@ INIT_LR = 1e-8
 ####################################################################################################
 #                                           CREATE MODEL                                           #
 ####################################################################################################
-model = Wukong(
+model = RankMixer(
     num_layers=NUM_LAYERS,
     num_sparse_embs=NUM_SPARSE_EMBS,
-    dim_emb=DIM_EMB,
+    num_tokens=NUM_TOKENS,
     dim_input_sparse=NUM_CAT_FEATURES,
     dim_input_dense=NUM_DENSE_FEATURES,
-    num_emb_lcb=NUM_EMB_LCB,
-    num_emb_fmb=NUM_EMB_FMB,
-    rank_fmb=RANK_FMB,
-    num_hidden_wukong=NUM_HIDDEN_WUKONG,
-    dim_hidden_wukong=DIM_HIDDEN_WUKONG,
+    dim_emb=DIM_EMB,
+    num_heads=NUM_HEADS,
+    expansion_ratio=EXPANSION_RATIO,
     num_hidden_head=NUM_HIDDEN_HEAD,
     dim_hidden_head=DIM_HIDDEN_HEAD,
     dim_output=DIM_OUTPUT,

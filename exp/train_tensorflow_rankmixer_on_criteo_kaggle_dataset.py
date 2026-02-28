@@ -93,7 +93,7 @@ DIM_OUTPUT = 1
 ####################################################################################################
 #                                   MODEL SPECIFIC CONFIGURATION                                   #
 ####################################################################################################
-NUM_LAYERS = 8  # number of Wukong layers
+NUM_LAYERS = 6  # number of Wukong layers
 DIM_EMB = 128  # dimension of embeddings
 NUM_TOKENS = 16  # number of tokens after semantic tokenization (T in the paper)
 NUM_HEADS = (
