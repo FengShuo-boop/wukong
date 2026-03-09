@@ -14,9 +14,9 @@ class RMSNorm(nn.Module):
         self.scale = nn.Parameter(torch.ones(dim))
 
     def forward(self, x):
-        x_fp32 = x.to(torch.float32)
-        norm = x_fp32.pow(2).mean(-1, keepdim=True)
-        x = x * torch.rsqrt(norm + self.eps).to(x.dtype)
+        # norm = mean(x^2)
+        norm = x.pow(2).mean(-1, keepdim=True)
+        x = x * torch.rsqrt(norm + self.eps)
         return self.scale * x
 
 
@@ -61,7 +61,7 @@ class SparsePertokenMoE(nn.Module):
     def forward(self, x):
         # Shape: (B, T, D)
         logits = self.router(x)
-        probs = F.softmax(logits.to(torch.float32), dim=-1).to(logits.dtype)
+        probs = F.softmax(logits, dim=-1)
 
         # Get top-k
         topk_vals, topk_idx = torch.topk(probs, k=self.top_k, dim=-1)
@@ -77,12 +77,11 @@ class SparsePertokenMoE(nn.Module):
             expert_outputs_sum = torch.zeros_like(x)
             for j, expert in enumerate(self.experts):
                 # 创建掩码
-                mask = (indices == j).unsqueeze(-1)
+                mask = (indices == j).type(x.dtype).unsqueeze(-1)
 
                 # 计算该 expert 的输出并累加
                 exp_out = expert(x)
-                safe_out = torch.where(mask, exp_out, torch.zeros_like(exp_out))
-                expert_outputs_sum += safe_out
+                expert_outputs_sum += exp_out * mask
 
             output += self.alpha * expert_prob * expert_outputs_sum
 

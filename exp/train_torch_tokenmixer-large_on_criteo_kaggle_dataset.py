@@ -126,7 +126,7 @@ NUM_HIDDEN_HEAD = 2
 DIM_HIDDEN_HEAD = 256
 DROPOUT = 0.5
 BIAS = True
-DTYPE = torch.float16
+DTYPE = torch.bfloat16
 
 ####################################################################################################
 #                                  TRAINING SPECIFIC CONFIGURATION                                 #
@@ -269,7 +269,7 @@ def validate(model, dataloader):
 ####################################################################################################
 #                                           TRAINING LOOP                                          #
 ####################################################################################################
-scaler = torch.amp.GradScaler(DEVICE_STR, enabled=(torch.float16 == DTYPE))
+scaler = torch.amp.GradScaler(DEVICE_STR, enabled=(torch.bfloat16 == DTYPE))
 model.train()
 
 if rank == 0:
@@ -287,15 +287,15 @@ for epoch in range(TRAIN_EPOCHS):
         dense_inputs = dense_inputs.to(DEVICE)
         labels = labels.to(DEVICE)
 
-        if torch.float16 == DTYPE:
+        if torch.bfloat16 == DTYPE:
             with torch.amp.autocast(DEVICE_STR):
                 outputs = model(
                     sparse_inputs,
-                    dense_inputs.to(torch.float16),
+                    dense_inputs.to(torch.bfloat16),
                 )
                 loss = critrion(
                     outputs.squeeze(),
-                    labels.to(torch.float16),
+                    labels.to(torch.bfloat16),
                 )
 
             model.zero_grad(set_to_none=True)
@@ -316,7 +316,7 @@ for epoch in range(TRAIN_EPOCHS):
             embedding_optimizer_lr_scheduler.step()
             other_optimizer_lr_scheduler.step()
         else:
-            raise ValueError("Unsupported DTYPE. Use torch.float16 or torch.float32.")
+            raise ValueError("Unsupported DTYPE. Use torch.bfloat16 or torch.float32.")
 
         if (batch_idx + 1) % LOGGER_PRINT_INTERVAL == 0 and rank == 0:
             logger.info(
