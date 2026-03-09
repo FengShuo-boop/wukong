@@ -141,6 +141,7 @@ BATCH_SIZE = 16384 // world_size
 TRAIN_EPOCHS = 10
 PEAK_LR = 0.004
 INIT_LR = 1e-8
+GRAD_MAX_NORM = 1.0
 
 ####################################################################################################
 #                                           CREATE MODEL                                           #
@@ -300,6 +301,7 @@ for epoch in range(TRAIN_EPOCHS):
 
             model.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=GRAD_MAX_NORM)
             scaler.step(embedding_optimizer)
             scaler.step(other_optimizer)
             scaler.update()
@@ -311,6 +313,7 @@ for epoch in range(TRAIN_EPOCHS):
             loss = critrion(outputs.squeeze(), labels.to(torch.float32))
             model.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=GRAD_MAX_NORM)
             embedding_optimizer.step()
             other_optimizer.step()
             embedding_optimizer_lr_scheduler.step()
