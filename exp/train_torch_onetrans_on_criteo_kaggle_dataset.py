@@ -11,7 +11,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 
-from model.pytorch.wukong import Wukong
+from model.pytorch.onetrans import OneTrans
 from data.pytorch.criteo_kaggle_dataset import CriteoDataset
 
 ####################################################################################################
@@ -115,18 +115,17 @@ DIM_OUTPUT = 1
 ####################################################################################################
 #                                   MODEL SPECIFIC CONFIGURATION                                   #
 ####################################################################################################
-NUM_LAYERS = 8
+LS = 16
+LNS = 16
 DIM_EMB = 128
-NUM_EMB_LCB = 32
-NUM_EMB_FMB = 32
-RANK_FMB = 24
-NUM_HIDDEN_WUKONG = 3
-DIM_HIDDEN_WUKONG = 2048
+NUM_HEADS = (
+    16  # number of attention heads in the token mixer（H in the paper）H must same as T
+)
 NUM_HIDDEN_HEAD = 2
 DIM_HIDDEN_HEAD = 256
 DROPOUT = 0.5
-BIAS = False
-DTYPE = torch.float16
+BIAS = True
+DTYPE = torch.bfloat16
 
 ####################################################################################################
 #                                  TRAINING SPECIFIC CONFIGURATION                                 #
@@ -141,21 +140,19 @@ BATCH_SIZE = 16384 // world_size
 TRAIN_EPOCHS = 10
 PEAK_LR = 0.004
 INIT_LR = 1e-8
+GRAD_MAX_NORM = 1.0
 
 ####################################################################################################
 #                                           CREATE MODEL                                           #
 ####################################################################################################
-model = Wukong(
-    num_layers=NUM_LAYERS,
-    num_sparse_embs=NUM_SPARSE_EMBS,
+model = OneTrans(
+    LS=LS,
+    LNS=LNS,
     dim_emb=DIM_EMB,
-    dim_input_sparse=NUM_CAT_FEATURES,
+    num_heads=NUM_HEADS,
+    d_ff=NUM_HEADS * DIM_EMB,
+    num_sparse_embs=NUM_SPARSE_EMBS,
     dim_input_dense=NUM_DENSE_FEATURES,
-    num_emb_lcb=NUM_EMB_LCB,
-    num_emb_fmb=NUM_EMB_FMB,
-    rank_fmb=RANK_FMB,
-    num_hidden_wukong=NUM_HIDDEN_WUKONG,
-    dim_hidden_wukong=DIM_HIDDEN_WUKONG,
     num_hidden_head=NUM_HIDDEN_HEAD,
     dim_hidden_head=DIM_HIDDEN_HEAD,
     dim_output=DIM_OUTPUT,
@@ -270,7 +267,7 @@ def validate(model, dataloader):
 ####################################################################################################
 #                                           TRAINING LOOP                                          #
 ####################################################################################################
-scaler = torch.amp.GradScaler(DEVICE_STR, enabled=(torch.float16 == DTYPE))
+scaler = torch.amp.GradScaler(DEVICE_STR, enabled=(torch.bfloat16 == DTYPE))
 model.train()
 
 if rank == 0:
@@ -288,19 +285,20 @@ for epoch in range(TRAIN_EPOCHS):
         dense_inputs = dense_inputs.to(DEVICE)
         labels = labels.to(DEVICE)
 
-        if torch.float16 == DTYPE:
+        if torch.bfloat16 == DTYPE:
             with torch.amp.autocast(DEVICE_STR):
                 outputs = model(
                     sparse_inputs,
-                    dense_inputs.to(torch.float16),
+                    dense_inputs.to(torch.bfloat16),
                 )
                 loss = critrion(
                     outputs.squeeze(),
-                    labels.to(torch.float16),
+                    labels.to(torch.bfloat16),
                 )
 
             model.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=GRAD_MAX_NORM)
             scaler.step(embedding_optimizer)
             scaler.step(other_optimizer)
             scaler.update()
@@ -312,12 +310,13 @@ for epoch in range(TRAIN_EPOCHS):
             loss = critrion(outputs.squeeze(), labels.to(torch.float32))
             model.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=GRAD_MAX_NORM)
             embedding_optimizer.step()
             other_optimizer.step()
             embedding_optimizer_lr_scheduler.step()
             other_optimizer_lr_scheduler.step()
         else:
-            raise ValueError("Unsupported DTYPE. Use torch.float16 or torch.float32.")
+            raise ValueError("Unsupported DTYPE. Use torch.bfloat16 or torch.float32.")
 
         if (batch_idx + 1) % LOGGER_PRINT_INTERVAL == 0 and rank == 0:
             logger.info(
