@@ -127,7 +127,9 @@ class PyramidMixedCausalAttention(nn.Module):
         q = torch.arange(L - Lq, L, device=x.device).unsqueeze(1)
         k = torch.arange(L, device=x.device).unsqueeze(0)
         mask = k > q  # [Lq, L]
-        logits = logits.masked_fill(mask.unsqueeze(0).unsqueeze(0), -1e9)
+        logits = logits.masked_fill(
+            mask.unsqueeze(0).unsqueeze(0), torch.finfo(logits.dtype).min
+        )
 
         out = torch.matmul(F.softmax(logits, dim=-1), Vh)  # [B,H,Lq,dh]
         return self.Wo(self._unmh(out))  # [B,Lq,D]
