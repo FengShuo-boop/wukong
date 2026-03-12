@@ -19,7 +19,12 @@ pip install -r requirement.txt
 
 ## Usage <a name = "usage"></a>
 
-### Pytorch
+### Dataset prepare
+
+1. download dataset from baidu netdisk: https://pan.baidu.com/s/1fxTInhCjw8uASJd3v79Xog?pwd=xp33
+2. change exp/train_*.py code `NPZ_FILE_PATH` to dataset local path
+
+### Pytorch train
 
 ```bash
 # export to onnx
@@ -32,7 +37,22 @@ python3 -m exp.train_torch_wukong_on_criteo_kaggle_dataset
 torchrun --nproc_per_node=8 -m exp.train_torch_wukong_on_criteo_kaggle_dataset
 ```
 
-### Tensorflow
+### Tensorflow(v2.6.1) train
+
+- If use musa device, please:
+```bash
+# clone tensorflow musa extension
+git clone git@github.com:MooreThreads/tensorflow_musa_extension.git
+cd tensorflow_musa_extension
+
+# build tensorflow musa
+bash build.sh
+
+# add absolute path of build/libmusa_plugin.so to exp/ptrain_tensorflow_*.py line 2
+# like: `tf.load_library("/path/to/libmusa_plugin.so")`
+# and then, use musa device train tensorflow
+```
+- train
 
 ```bash
 # export to onnx
