@@ -1,8 +1,4 @@
 import tensorflow as tf
-
-tf.load_library(
-    "/home/albert/Project/tensorflow_musa_extension/build/libmusa_plugin.so"
-)
 import numpy as np
 import random
 import logging
