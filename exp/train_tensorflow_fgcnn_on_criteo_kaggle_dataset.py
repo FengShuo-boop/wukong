@@ -6,7 +6,7 @@ import sys
 from datetime import datetime
 import os
 
-from model.tensorflow.onetrans import OneTrans
+from model.tensorflow.fgcnn import FGCNN
 from model.tensorflow.lr_schedule import LinearWarmup
 from data.tensorflow.criteo_kaggle_dataset import get_dataset
 
@@ -88,37 +88,28 @@ NUM_SPARSE_EMBS = [
     105,
     142572,
 ]
-DIM_OUTPUT = 1
 
 ####################################################################################################
 #                                   MODEL SPECIFIC CONFIGURATION                                   #
 ####################################################################################################
-LS = 16
-LNS = 16
-DIM_EMB = 128
-NUM_HEADS = (
-    16  # number of attention heads in the token mixer（H in the paper）H must same as T
-)
-NUM_HIDDEN_HEAD = 2
-DIM_HIDDEN_HEAD = 256
-DROPOUT = 0.5
-BIAS = True
-GRAD_MAX_NORM = 1.0
+NUM_LAYERS = 2  # number of Wukong layers
+DIM_EMB = 128  # dimension of embeddings
+NUM_HIDDEN_HEAD = 2  # number of hidden layers in the final prediction head MLPs
+DIM_HIDDEN_HEAD = 256  # dimension of hidden layers in the final prediction head
+DROPOUT = 0.5  # dropout rate
+BIAS = False  # whether to use bias terms in the model
 
 ####################################################################################################
 #                                           CREATE MODEL                                           #
 ####################################################################################################
-model = OneTrans(
-    LS=LS,
-    LNS=LNS,
-    dim_emb=DIM_EMB,
-    num_heads=NUM_HEADS,
-    d_ff=NUM_HEADS * DIM_EMB,
+model = FGCNN(
+    num_layers=NUM_LAYERS,
     num_sparse_embs=NUM_SPARSE_EMBS,
     dim_input_dense=NUM_DENSE_FEATURES,
+    dim_emb=DIM_EMB,
     num_hidden_head=NUM_HIDDEN_HEAD,
     dim_hidden_head=DIM_HIDDEN_HEAD,
-    dim_output=DIM_OUTPUT,
+    dim_output=1,
     dropout=DROPOUT,
     bias=BIAS,
 )
@@ -230,16 +221,7 @@ def train_step(inputs, labels):
     emb_grads = []
     other_grads = []
 
-    # 梯度裁剪
-    clipped_grads = []
-    for grad in grads:
-        if grad is not None:
-            clipped_grad = tf.clip_by_norm(grad, GRAD_MAX_NORM)  # 在这里裁剪梯度
-            clipped_grads.append(clipped_grad)
-        else:
-            clipped_grads.append(None)
-
-    for grad, var in zip(clipped_grads, model.trainable_variables):
+    for grad, var in zip(grads, model.trainable_variables):
         if grad is not None:
             if hasattr(var, "path"):
                 # path is available in TF 2.13+
@@ -252,7 +234,6 @@ def train_step(inputs, labels):
                     emb_grads.append((grad, var))
                 else:
                     other_grads.append((grad, var))
-
     embedding_optimizer.apply_gradients(emb_grads)
     other_optimizer.apply_gradients(other_grads)
 
