@@ -1,7 +1,7 @@
 import numpy as np
 import tensorflow as tf
-from tensorflow.python.keras import backend as K
-from tensorflow.python.keras.layers import (
+from tensorflow.keras import backend as K
+from tensorflow.keras.layers import (
     LSTM,
     Lambda,
     Layer,
@@ -11,11 +11,11 @@ from tensorflow.python.keras.layers import (
     Dense,
     ReLU,
 )
-from tensorflow.python.keras.regularizers import l2
-from tensorflow.python.ops.init_ops import (
+from tensorflow.keras.regularizers import l2
+from tensorflow.keras.initializers import (
     TruncatedNormal,
-    glorot_uniform_initializer as glorot_uniform,
-    glorot_normal_initializer as glorot_normal,
+    GlorotUniform,
+    GlorotNormal,
     Constant,
     Zeros,
 )
@@ -141,7 +141,7 @@ class LocalActivationUnit(Layer):
             else self.hidden_units[-1]
         )
         self.kernel = self.add_weight(
-            shape=(size, 1), initializer=glorot_normal(seed=self.seed), name="kernel"
+            shape=(size, 1), initializer=GlorotNormal(seed=self.seed), name="kernel"
         )
         self.bias = self.add_weight(shape=(1,), initializer=Zeros(), name="bias")
         self.dnn = DNN(
@@ -229,7 +229,7 @@ class DNN(Layer):
             self.add_weight(
                 name="kernel" + str(i),
                 shape=(hidden_units[i], hidden_units[i + 1]),
-                initializer=glorot_normal(seed=self.seed),
+                initializer=GlorotNormal(seed=self.seed),
                 regularizer=l2(self.l2_reg),
                 trainable=True,
             )
@@ -620,13 +620,13 @@ class Transformer(Layer):
                 "b",
                 shape=[self.att_embedding_size],
                 dtype=tf.float32,
-                initializer=glorot_uniform(seed=self.seed),
+                initializer=GlorotUniform(seed=self.seed),
             )
             self.v = self.add_weight(
                 "v",
                 shape=[self.att_embedding_size],
                 dtype=tf.float32,
-                initializer=glorot_uniform(seed=self.seed),
+                initializer=GlorotUniform(seed=self.seed),
             )
         elif self.attention_type == "ln":
             self.att_ln_q = LayerNormalization()
@@ -636,13 +636,13 @@ class Transformer(Layer):
                 "fw1",
                 shape=[self.num_units, 4 * self.num_units],
                 dtype=tf.float32,
-                initializer=glorot_uniform(seed=self.seed),
+                initializer=GlorotUniform(seed=self.seed),
             )
             self.fw2 = self.add_weight(
                 "fw2",
                 shape=[4 * self.num_units, self.num_units],
                 dtype=tf.float32,
-                initializer=glorot_uniform(seed=self.seed),
+                initializer=GlorotUniform(seed=self.seed),
             )
 
         self.dropout = Dropout(self.dropout_rate, seed=self.seed)
