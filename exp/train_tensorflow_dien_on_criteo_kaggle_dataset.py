@@ -1,6 +1,4 @@
 import tensorflow as tf
-
-# tf.load_library("/workspace/tensorflow_musa_extension/build/libmusa_plugin.so")
 import numpy as np
 import random
 import logging
@@ -138,7 +136,7 @@ model = DIEN(
 ####################################################################################################
 #                                  TRAINING SPECIFIC CONFIGURATION                                 #
 ####################################################################################################
-BATCH_SIZE = 128
+BATCH_SIZE = 16384
 TRAIN_EPOCHS = 10
 PEAK_LR = 0.001
 INIT_LR = 1e-8

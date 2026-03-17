@@ -1,6 +1,7 @@
 import tensorflow as tf
 from tensorflow.keras import layers, Model
-from typing import List, Optional
+from typing import List
+
 from model.tensorflow.embedding import SparseEmbedding
 from model.tensorflow.mlp import MLP
 
@@ -511,3 +512,39 @@ class DIEN(Model):
         # Final Prediction
         logits = self.prediction_head(final_features, training=training)
         return logits
+
+
+if __name__ == "__main__":
+    # Example usage
+    model = DIEN(
+        num_sparse_embs=[1000, 1000],
+        num_seq_embs=1000,
+        dim_emb=64,
+        dim_input_sparse=2,
+        dim_input_dense=1,
+        max_seq_len=50,
+        extractor_hidden_dim=64,
+        evolution_hidden_dim=64,
+        num_hidden_head=2,
+        dim_hidden_head=32,
+        use_auxiliary_loss=True,
+        gru_type="AUGRU",
+        att_hidden_units=[64, 16],
+        att_activation="dice",
+        att_weight_normalization=False,
+        dim_output=1,
+        dropout=0.2,
+        bias=True,
+    )
+
+    # Dummy input data
+    batch_size = 4
+    static_sparse_inputs = tf.random.uniform((batch_size, 2), maxval=1000, dtype=tf.int32)
+    dense_inputs = tf.random.uniform((batch_size, 1), dtype=tf.float32)
+    seq_inputs = tf.random.uniform((batch_size, 50), maxval=1000, dtype=tf.int32)
+    seq_length = tf.constant([[50], [45], [30], [20]], dtype=tf.int32)
+    neg_seq_inputs = tf.random.uniform((batch_size, 50), maxval=1000, dtype=tf.int32)
+
+    inputs = (static_sparse_inputs, dense_inputs, seq_inputs, seq_length, neg_seq_inputs)
+    outputs = model(inputs, training=True)
+    print("Model output shape:", outputs.shape)
