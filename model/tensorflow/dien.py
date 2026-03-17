@@ -539,12 +539,20 @@ if __name__ == "__main__":
 
     # Dummy input data
     batch_size = 4
-    static_sparse_inputs = tf.random.uniform((batch_size, 2), maxval=1000, dtype=tf.int32)
+    static_sparse_inputs = tf.random.uniform(
+        (batch_size, 2), maxval=1000, dtype=tf.int32
+    )
     dense_inputs = tf.random.uniform((batch_size, 1), dtype=tf.float32)
     seq_inputs = tf.random.uniform((batch_size, 50), maxval=1000, dtype=tf.int32)
     seq_length = tf.constant([[50], [45], [30], [20]], dtype=tf.int32)
     neg_seq_inputs = tf.random.uniform((batch_size, 50), maxval=1000, dtype=tf.int32)
 
-    inputs = (static_sparse_inputs, dense_inputs, seq_inputs, seq_length, neg_seq_inputs)
+    inputs = (
+        static_sparse_inputs,
+        dense_inputs,
+        seq_inputs,
+        seq_length,
+        neg_seq_inputs,
+    )
     outputs = model(inputs, training=True)
     print("Model output shape:", outputs.shape)
