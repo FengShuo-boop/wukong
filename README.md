@@ -48,7 +48,7 @@ cd tensorflow_musa_extension
 # build tensorflow musa
 bash build.sh
 
-# add absolute path of build/libmusa_plugin.so to exp/ptrain_tensorflow_*.py line 2
+# add absolute path of build/libmusa_plugin.so to exp/train_tensorflow_*.py line 2
 # like: `tf.load_library("/path/to/libmusa_plugin.so")`
 # and then, use musa device train tensorflow
 ```
