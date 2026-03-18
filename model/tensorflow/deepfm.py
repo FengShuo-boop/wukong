@@ -164,3 +164,35 @@ class DeepFM(Model):
         # -------------------------- Final Combined Logit --------------------------
         final_logit = linear_logit + fm_logit + dnn_logit
         return final_logit
+
+
+if __name__ == "__main__":
+    # Example usage for DeepFM
+    batch_size = 4
+    num_sparse_embs = [100, 100, 100]
+    dim_emb = 10
+    dim_input_sparse = len(num_sparse_embs)
+    dim_input_dense = 5
+
+    model = DeepFM(
+        num_sparse_embs=num_sparse_embs,
+        dim_emb=dim_emb,
+        dim_input_sparse=dim_input_sparse,
+        dim_input_dense=dim_input_dense,
+        dnn_hidden_units=(400, 400, 400),
+        l2_reg_linear=1e-5,
+        l2_reg_embedding=1e-5,
+        l2_reg_dnn=0.0,
+        dropout=0.5,
+        use_bias=True,
+        dim_output=1,
+    )
+
+    # Dummy input data
+    sparse_inputs = tf.random.uniform(
+        (batch_size, dim_input_sparse), maxval=num_sparse_embs[0], dtype=tf.int32
+    )
+    dense_inputs = tf.random.normal((batch_size, dim_input_dense))
+
+    logits = model((sparse_inputs, dense_inputs), training=False)
+    print("DeepFM Logits shape:", logits.shape)
