@@ -126,7 +126,7 @@ NUM_HIDDEN_HEAD = 2
 DIM_HIDDEN_HEAD = 256
 DROPOUT = 0.5
 BIAS = False
-DTYPE = torch.float16
+DTYPE = torch.float32
 
 ####################################################################################################
 #                                  TRAINING SPECIFIC CONFIGURATION                                 #
