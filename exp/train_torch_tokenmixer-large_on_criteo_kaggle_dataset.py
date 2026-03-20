@@ -137,7 +137,7 @@ if is_distributed:
 else:
     DEVICE = torch.device(DEVICE_STR)
 
-BATCH_SIZE = 16384 // world_size
+BATCH_SIZE = 8192 // world_size
 TRAIN_EPOCHS = 10
 PEAK_LR = 0.004
 INIT_LR = 1e-8
