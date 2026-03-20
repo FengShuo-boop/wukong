@@ -1,6 +1,6 @@
 import math
 import torch
-from torch import Tensor, nn
+from torch import nn
 import torch.nn.functional as F
 from typing import List
 
@@ -8,77 +8,72 @@ from model.pytorch.embedding import Embedding
 from model.pytorch.mlp import MLP
 
 
-def custom_gelu(x):
-    """Matches the exact approximation used in the TF implementation."""
-    return (
-        0.5
-        * x
-        * (
-            1.0
-            + torch.tanh(math.sqrt(2.0 / math.pi) * (x + 0.044715 * torch.pow(x, 3)))
-        )
-    )
-
-
 class SemanticTokenization(nn.Module):
-    def __init__(self, num_T, in_features_per_token, num_D):
+    def __init__(self, dim_in: int, num_T: int, num_D: int):
         super().__init__()
         self.num_T = num_T
         self.num_D = num_D
-        # PyTorch requires explicit input dimensions
+
+        # 计算每个 token 块的输入维度
+        self.chunk_size = dim_in // num_T
+
         self.dense_layers = nn.ModuleList(
-            [nn.Linear(in_features_per_token, num_D) for _ in range(num_T)]
+            [nn.Linear(self.chunk_size, num_D) for _ in range(num_T)]
         )
 
-    def forward(self, x):
-        # x: (B, num_T * in_features_per_token)
-        x_chunks = torch.chunk(
-            x, self.num_T, dim=-1
-        )  # Tuple of (B, in_features_per_token)
-        outputs = [layer(chunk) for chunk, layer in zip(x_chunks, self.dense_layers)]
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, dim_in) -> (B, num_T, chunk_size)
+        x_chunks = torch.split(x, self.chunk_size, dim=-1)
+
+        outputs = [layer(x_chunks[i]) for i, layer in enumerate(self.dense_layers)]
         return torch.stack(outputs, dim=1)  # (B, num_T, num_D)
 
 
 class TokenMixer(nn.Module):
-    def __init__(self, num_T, num_D, num_H):
+    def __init__(self, num_T: int, num_D: int, num_H: int):
         super().__init__()
         self.num_T = num_T
         self.num_D = num_D
         self.num_H = num_H
         self.d_k = num_D // num_H
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         B = x.size(0)
         # (B, T, D) -> (B, T, H, D/H)
         x = x.view(B, self.num_T, self.num_H, self.d_k)
-        # (B, T, H, D/H) -> (B, H, T, D/H)
+        # -> (B, H, T, D/H)
         x = x.permute(0, 2, 1, 3).contiguous()
-        # (B, H, T, D/H) -> (B, H, T * D/H)
+        # -> (B, H, T * D/H)
         x = x.view(B, self.num_H, self.num_T * self.d_k)
         return x
 
 
 class PerTokenFFN(nn.Module):
-    def __init__(self, num_T, num_D, expansion_ratio=4, dropout=0.0):
+    def __init__(
+        self, num_T: int, num_D: int, expansion_ratio: int = 4, dropout: float = 0.0
+    ):
         super().__init__()
-        self.experts = nn.ModuleList()
-        for i in range(num_T):
-            self.experts.append(
+
+        # 每个 expert 的 FFN
+        self.experts = nn.ModuleList(
+            [
                 nn.Sequential(
                     nn.Linear(num_D, num_D * expansion_ratio),
-                    nn.GELU(
-                        approximate="tanh"
-                    ),  # You can swap this with custom_gelu if preferred
+                    nn.GELU(approximate="tanh"),
                     nn.Dropout(dropout),
                     nn.Linear(num_D * expansion_ratio, num_D),
                 )
-            )
+                for _ in range(num_T)
+            ]
+        )
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         outputs = []
         for i, expert in enumerate(self.experts):
             h = x[:, i, :]
-            outputs.append(expert(h))
+            h = expert(h)
+            outputs.append(h)
+
         return torch.stack(outputs, dim=1)
 
 
@@ -89,15 +84,15 @@ class PerTokenSparseMoE(nn.Module):
 
     def __init__(
         self,
-        num_T,
-        num_D,
-        expansion_ratio=4,
-        num_experts=4,
-        dropout=0.0,
-        l1_coef=0.0,  # Unused in TF forward, keeping for signature parity
-        sparsity_ratio=1.0,  # Unused in TF forward, keeping for signature parity
-        use_dtsi=True,
-        routing_type="relu_dtsi",
+        num_T: int,
+        num_D: int,
+        expansion_ratio: int = 4,
+        num_experts: int = 4,
+        dropout: float = 0.0,
+        l1_coef: float = 0.0,
+        sparsity_ratio: float = 1.0,
+        use_dtsi: bool = True,
+        routing_type: str = "relu_dtsi",
     ):
         super().__init__()
         self.num_T = int(num_T)
@@ -105,12 +100,14 @@ class PerTokenSparseMoE(nn.Module):
         self.expansion_ratio = int(expansion_ratio)
         self.num_experts = int(num_experts)
         self.dropout = nn.Dropout(dropout)
+        self.l1_coef = float(l1_coef)
+        self.sparsity_ratio = float(sparsity_ratio) if sparsity_ratio else 1.0
         self.use_dtsi = bool(use_dtsi)
         self.routing_type = str(routing_type).lower()
 
         hidden_dim = self.num_D * self.expansion_ratio
 
-        # Define custom weights
+        # 可学习参数
         self.W1 = nn.Parameter(
             torch.empty(self.num_T, self.num_experts, self.num_D, hidden_dim)
         )
@@ -134,25 +131,33 @@ class PerTokenSparseMoE(nn.Module):
 
         self._reset_parameters()
 
-    def _trunc_normal(self, tensor, fan_in):
-        # Approximates TF's VarianceScaling(scale=2.0, mode="fan_in", distribution="truncated_normal")
-        std = math.sqrt(2.0 / fan_in)
-        nn.init.trunc_normal_(tensor, mean=0.0, std=std, a=-2 * std, b=2 * std)
-
     def _reset_parameters(self):
-        self._trunc_normal(self.W1, fan_in=self.num_D)
-        self._trunc_normal(self.W2, fan_in=self.num_D * self.expansion_ratio)
-        self._trunc_normal(self.gate_w_train, fan_in=self.num_D)
-        if self.use_dtsi:
-            self._trunc_normal(self.gate_w_infer, fan_in=self.num_D)
+        # 等效于 TF 的 VarianceScaling(scale=2.0, mode="fan_in", distribution="truncated_normal")
+        std_w1 = math.sqrt(2.0 / self.num_D)
+        nn.init.trunc_normal_(self.W1, std=std_w1)
 
-    def _router_logits(self, x, w, b):
+        std_w2 = (
+            math.sqrt(2.0 / hidden_dim)
+            if (hidden_dim := self.num_D * self.expansion_ratio)
+            else 0
+        )
+        nn.init.trunc_normal_(self.W2, std=std_w2)
+
+        std_gate = math.sqrt(2.0 / self.num_D)
+        nn.init.trunc_normal_(self.gate_w_train, std=std_gate)
+        if self.use_dtsi:
+            nn.init.trunc_normal_(self.gate_w_infer, std=std_gate)
+
+    def _router_logits(
+        self, x: torch.Tensor, w: torch.Tensor, b: torch.Tensor
+    ) -> torch.Tensor:
+        # 每个 token 的路由 logits
         return torch.einsum("btd,tde->bte", x, w) + b
 
-    def forward(self, x):
-        # x shape: [B, T, D]
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # 计算每个 token 的专家输出
         h = torch.einsum("btd,tedh->bteh", x, self.W1) + self.b1
-        h = custom_gelu(h)
+        h = F.gelu(h, approximate="tanh")
         h = self.dropout(h)
 
         expert_out = torch.einsum("bteh,tehd->bted", h, self.W2) + self.b2
@@ -175,15 +180,22 @@ class PerTokenSparseMoE(nn.Module):
         else:
             gate_infer = gate_train
 
-        # Use self.training built-in PyTorch flag
+        # 根据 self.training 自动选择 gate
         gate = gate_train if self.training else gate_infer
+
         y = torch.sum(expert_out * gate.unsqueeze(-1), dim=2)
         return y
 
 
 class RankMixerLayer(nn.Module):
     def __init__(
-        self, num_T, num_D, num_H, expansion_ratio, use_moe=False, dropout=0.0
+        self,
+        num_T: int,
+        num_D: int,
+        num_H: int,
+        expansion_ratio: int,
+        use_moe: bool = False,
+        dropout: float = 0.0,
     ):
         super().__init__()
         self.token_mixer = TokenMixer(num_T, num_D, num_H)
@@ -200,7 +212,7 @@ class RankMixerLayer(nn.Module):
         self.norm1 = nn.LayerNorm(num_D, eps=1e-6)
         self.norm2 = nn.LayerNorm(num_D, eps=1e-6)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         mixed_x = self.token_mixer(x)
         x = self.norm1(x + mixed_x)
         x = self.norm2(x + self.per_token_ffn(x))
@@ -227,32 +239,29 @@ class RankMixer(nn.Module):
         super().__init__()
         if num_tokens != num_heads:
             raise ValueError(
-                f"num_tokens (T) must be equal to num_heads (H) for RankMixerLayer, "
-                f"but got T={num_tokens}, H={num_heads}"
+                f"num_tokens (T) must be equal to num_heads (H) for RankMixerLayer, but got T={num_tokens}, H={num_heads}"
             )
-
-        self.embedding = Embedding(num_sparse_embs, dim_emb, dim_input_dense, bias)
 
         self.dim_emb = dim_emb
         self.dim_input_dense = dim_input_dense
         self.dim_input_sparse = dim_input_sparse
         self.num_tokens = num_tokens
 
-        # In PyTorch, we pre-calculate the flat input dimension for SemanticTokenization
-        in_features_per_token = (
-            (dim_input_dense + dim_input_sparse) * dim_emb
-        ) // num_tokens
+        self.embedding = Embedding(num_sparse_embs, dim_emb, dim_input_dense, bias)
+
+        # 计算 SemanticTokenization 需要的输入总维度
+        dim_in_semantic = (dim_input_dense + dim_input_sparse) * dim_emb
         self.semantic_tokenization = SemanticTokenization(
-            num_tokens, in_features_per_token, dim_emb
+            dim_in_semantic, num_tokens, dim_emb
         )
 
         self.layers_list = nn.ModuleList(
             [
                 RankMixerLayer(
-                    num_tokens,
-                    dim_emb,
-                    num_heads,
-                    expansion_ratio,
+                    num_T=num_tokens,
+                    num_D=dim_emb,
+                    num_H=num_heads,
+                    expansion_ratio=expansion_ratio,
                     use_moe=(i % 2 == 0),
                     dropout=dropout,
                 )
@@ -261,27 +270,22 @@ class RankMixer(nn.Module):
         )
 
         self.projection_head = MLP(
-            num_tokens * dim_emb,
-            num_hidden_head,
-            dim_hidden_head,
-            dim_output,
-            dropout,
-            bias,
+            dim_in=num_tokens * dim_emb,
+            num_hidden=num_hidden_head,
+            dim_hidden=dim_hidden_head,
+            dim_out=dim_output,
+            dropout=dropout,
+            bias=bias,
         )
 
-    def forward(self, sparse_inputs: Tensor, dense_inputs) -> Tensor:
+    def forward(self, sparse_inputs, dense_inputs) -> torch.Tensor:
         x = self.embedding(sparse_inputs, dense_inputs)
-
-        B = x.size(0)
-        # Reshape to (B, total_features)
-        x = x.view(B, (self.dim_input_dense + self.dim_input_sparse) * self.dim_emb)
-
+        x = x.view(-1, (self.dim_input_dense + self.dim_input_sparse) * self.dim_emb)
         x = self.semantic_tokenization(x)
 
         for layer in self.layers_list:
             x = layer(x)
 
-        x = x.view(B, self.num_tokens * self.dim_emb)
+        x = x.view(-1, self.num_tokens * self.dim_emb)
         x = self.projection_head(x)
-
         return x

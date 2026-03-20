@@ -40,7 +40,7 @@ torch.manual_seed(SEED)
 ####################################################################################################
 #                                         CREATE LOGGER                                            #
 ####################################################################################################
-logger = logging.getLogger("wukong_training")
+logger = logging.getLogger("onetrans_training")
 logger.setLevel(logging.INFO)
 
 if rank == 0:
