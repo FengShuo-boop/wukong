@@ -92,32 +92,21 @@ NUM_SPARSE_EMBS = [
 ####################################################################################################
 #                                   MODEL SPECIFIC CONFIGURATION                                   #
 ####################################################################################################
-NUM_LAYERS = 2  # number of Wukong layers
 DIM_EMB = 128  # dimension of embeddings
-NUM_HIDDEN_HEAD = 2  # number of hidden layers in the final prediction head MLPs
-DIM_HIDDEN_HEAD = 256  # dimension of hidden layers in the final prediction head
-DROPOUT = 0.5  # dropout rate
-BIAS = False  # whether to use bias terms in the model
 
 ####################################################################################################
 #                                           CREATE MODEL                                           #
 ####################################################################################################
 model = FGCNN(
-    num_layers=NUM_LAYERS,
     num_sparse_embs=NUM_SPARSE_EMBS,
     dim_input_dense=NUM_DENSE_FEATURES,
     dim_emb=DIM_EMB,
-    num_hidden_head=NUM_HIDDEN_HEAD,
-    dim_hidden_head=DIM_HIDDEN_HEAD,
-    dim_output=1,
-    dropout=DROPOUT,
-    bias=BIAS,
 )
 
 ####################################################################################################
 #                                  TRAINING SPECIFIC CONFIGURATION                                 #
 ####################################################################################################
-BATCH_SIZE = 4096
+BATCH_SIZE = 16384
 TRAIN_EPOCHS = 10
 PEAK_LR = 0.004
 INIT_LR = 1e-8
@@ -285,6 +274,6 @@ for epoch in range(TRAIN_EPOCHS):
         tf.summary.scalar("validation_recall_pos", recall_pos, step=epoch + 1)
 
     if SAVE_CHECKPOINTS:
-        ckpt_path = os.path.join(checkpoint_dir, f"wukong_epoch_{epoch+1}")
+        ckpt_path = os.path.join(checkpoint_dir, f"fgcnn_epoch_{epoch+1}")
         model.save_weights(ckpt_path)
         logger.info(f"Model checkpoint saved for epoch {epoch+1} at {ckpt_path}")

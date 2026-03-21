@@ -87,23 +87,20 @@ NUM_SPARSE_EMBS = [
     105,
     142572,
 ]
+
+####################################################################################################
+#                                   MODEL SPECIFIC CONFIGURATION                                   #
+####################################################################################################
 # Sequence configuration (for DIEN compatibility layer)
 NUM_SEQ_EMBS = NUM_SPARSE_EMBS[2]  # Use item id vocab size
 MAX_SEQ_LEN = 1  # Temporarily set to 1 for compatibility
 DIM_OUTPUT = 1
 USE_AUXILIARY_LOSS = False  # Disable auxiliary loss temporarily
 AUX_LOSS_ALPHA = 1.0
-
-####################################################################################################
-#                                   MODEL SPECIFIC CONFIGURATION                                   #
-####################################################################################################
 DIM_EMB = 32
 EXTRACTOR_HIDDEN_DIM = 32
 EVOLUTION_HIDDEN_DIM = 32
 GRU_TYPE = "AUGRU"
-ATT_HIDDEN_UNITS = (64, 16)
-ATT_ACTIVATION = "dice"
-ATT_WEIGHT_NORMALIZATION = False
 NUM_HIDDEN_HEAD = 2
 DIM_HIDDEN_HEAD = 64
 DROPOUT = 0.3
@@ -125,9 +122,6 @@ model = DIEN(
     dim_hidden_head=DIM_HIDDEN_HEAD,
     use_auxiliary_loss=USE_AUXILIARY_LOSS,
     gru_type=GRU_TYPE,
-    att_hidden_units=ATT_HIDDEN_UNITS,
-    att_activation=ATT_ACTIVATION,
-    att_weight_normalization=ATT_WEIGHT_NORMALIZATION,
     dim_output=DIM_OUTPUT,
     dropout=DROPOUT,
     bias=BIAS,
@@ -136,18 +130,19 @@ model = DIEN(
 ####################################################################################################
 #                                  TRAINING SPECIFIC CONFIGURATION                                 #
 ####################################################################################################
-BATCH_SIZE = 16384
+BATCH_SIZE = 4096
 TRAIN_EPOCHS = 10
-PEAK_LR = 0.001
+LEARNING_RATE = 0.001
+PEAK_LR = 0.004
 INIT_LR = 1e-8
 TOTAL_STEPS_PER_EPOCH = 39291958 // BATCH_SIZE
-TOTAL_ITERS = TOTAL_STEPS_PER_EPOCH * TRAIN_EPOCHS
+TOTAL_ITERS = TOTAL_STEPS_PER_EPOCH
+
 lr_schedule = LinearWarmup(
-    initial_learning_rate=INIT_LR,
-    peak_learning_rate=PEAK_LR,
-    warmup_steps=TOTAL_STEPS_PER_EPOCH,
+    initial_learning_rate=INIT_LR, peak_learning_rate=PEAK_LR, warmup_steps=TOTAL_ITERS
 )
-optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
+embedding_optimizer = tf.keras.optimizers.SGD(learning_rate=lr_schedule)
+other_optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
 criterion = tf.keras.losses.BinaryCrossentropy(from_logits=True)
 
 ####################################################################################################
@@ -167,13 +162,10 @@ valid_dataset = get_dataset(
 )
 
 
-####################################################################################################
-#                         ADAPTER: WRAP DATASET FOR DIEN INPUT FORMAT                            #
-####################################################################################################
 def wrap_dataset_for_dien(dataset):
     """
-    Wrap Wukong dataset format to DIEN input format
-    Wukong inputs: (sparse_inputs, dense_inputs)
+    Wrap dataset format to DIEN input format
+    inputs: (sparse_inputs, dense_inputs)
     DIEN inputs: (sparse_inputs, dense_inputs, seq_inputs, seq_length)
     """
 
@@ -192,12 +184,14 @@ def wrap_dataset_for_dien(dataset):
     return dataset.map(adapter)
 
 
-# Apply adapter
 train_dataset = wrap_dataset_for_dien(train_dataset)
 valid_dataset = wrap_dataset_for_dien(valid_dataset)
+logger.info(
+    "Successfully loaded training and validation datasets from " + NPZ_FILE_PATH
+)
 
 ####################################################################################################
-#                                    BUILD MODEL & SEPARATE VARS                                   #
+#                                    BUILD MODEL WITH DUMMY INPUT                                  #
 ####################################################################################################
 # Trigger model build with dummy inputs
 dummy_static_sparse = tf.zeros((1, NUM_CAT_FEATURES), dtype=tf.int32)
@@ -207,15 +201,22 @@ dummy_seq_len = tf.constant([[MAX_SEQ_LEN]], dtype=tf.int32)
 dummy_inputs = (dummy_static_sparse, dummy_dense, dummy_seq, dummy_seq_len)
 _ = model(dummy_inputs, training=False)
 
-# Separate embedding and other parameters
 embedding_parameters = []
 other_parameters = []
+
 for var in model.trainable_variables:
-    var_identifier = var.path if hasattr(var, "path") else var.name
-    if "sparse_embedding" in var_identifier and "embeddings" in var.name:
-        embedding_parameters.append(var)
+    if hasattr(var, "path"):
+        # path is available in TF 2.13+
+        if "sparse_embedding" in var.path and "embeddings" in var.name:
+            embedding_parameters.append(var)
+        else:
+            other_parameters.append(var)
     else:
-        other_parameters.append(var)
+        if "sparse_embedding" in var.name:
+            embedding_parameters.append(var)
+        else:
+            other_parameters.append(var)
+
 logger.info(f"Number of embedding parameters: {len(embedding_parameters)}")
 logger.info(f"Number of other parameters: {len(other_parameters)}")
 
@@ -228,24 +229,27 @@ def validate(model, dataset):
     num_correct = 0
     pos_samples = 0
     pos_correct = 0
-    total_loss = 0.0
+
     for inputs, labels in dataset:
         outputs = model(inputs, training=False)
+
         labels = tf.cast(labels, tf.float32)
         outputs = tf.squeeze(outputs)
-        batch_loss = criterion(labels, outputs)
-        total_loss += batch_loss.numpy() * labels.shape[0]
+
         predictions = tf.cast(outputs >= 0, tf.float32)
+
         num_samples += labels.shape[0]
         pos_samples += tf.reduce_sum(labels).numpy()
+
         correct_preds = tf.cast(tf.equal(predictions, labels), tf.float32)
         num_correct += tf.reduce_sum(correct_preds).numpy()
+
         pos_mask = tf.equal(labels, 1.0)
         pos_correct += tf.reduce_sum(tf.boolean_mask(predictions, pos_mask)).numpy()
+
     accuracy = num_correct / num_samples if num_samples > 0 else 0
-    avg_loss = total_loss / num_samples if num_samples > 0 else 0
     recall_pos = pos_correct / pos_samples if pos_samples > 0 else 0
-    return accuracy, avg_loss, num_samples, recall_pos, pos_samples
+    return accuracy, num_samples, recall_pos, pos_samples
 
 
 ####################################################################################################
@@ -255,64 +259,75 @@ def validate(model, dataset):
 def train_step(inputs, labels):
     with tf.GradientTape() as tape:
         outputs = model(inputs, training=True)
-        main_loss = criterion(labels, tf.squeeze(outputs))
-        total_loss = main_loss
-        if USE_AUXILIARY_LOSS and model.losses:
-            aux_loss = tf.add_n(model.losses)
-            total_loss += AUX_LOSS_ALPHA * aux_loss
-    grads = tape.gradient(total_loss, model.trainable_variables)
-    optimizer.apply_gradients(zip(grads, model.trainable_variables))
-    return total_loss, main_loss, (aux_loss if USE_AUXILIARY_LOSS else 0.0)
+        loss = criterion(labels, tf.squeeze(outputs))
+
+    grads = tape.gradient(loss, model.trainable_variables)
+    emb_grads = []
+    other_grads = []
+
+    for grad, var in zip(grads, model.trainable_variables):
+        if grad is not None:
+            if hasattr(var, "path"):
+                # path is available in TF 2.13+
+                if "sparse_embedding" in var.path and "embeddings" in var.name:
+                    emb_grads.append((grad, var))
+                else:
+                    other_grads.append((grad, var))
+            else:
+                if "sparse_embedding" in var.name:
+                    emb_grads.append((grad, var))
+                else:
+                    other_grads.append((grad, var))
+    embedding_optimizer.apply_gradients(emb_grads)
+    other_optimizer.apply_gradients(other_grads)
+
+    return loss
 
 
 ####################################################################################################
 #                                           TRAINING LOOP                                          #
 ####################################################################################################
-global_step = 0
+step = 0
+embedding_lr_metric = tf.keras.metrics.Mean()
+other_lr_metric = tf.keras.metrics.Mean()
+
 for epoch in range(TRAIN_EPOCHS):
     logger.info(f"Starting Epoch {epoch+1}/{TRAIN_EPOCHS}")
+
     for batch_idx, (inputs, labels) in enumerate(train_dataset):
         labels = tf.cast(labels, tf.float32)
-        total_loss, main_loss, aux_loss = train_step(inputs, labels)
-        current_lr = lr_schedule(global_step)
+
+        loss = train_step(inputs, labels)
+        current_lr = lr_schedule(step)
 
         if (batch_idx + 1) % LOGGER_PRINT_INTERVAL == 0:
-            log_msg = (
+            logger.info(
                 f"Epoch [{epoch+1}/{TRAIN_EPOCHS}], "
                 f"Batch [{batch_idx+1}/{TOTAL_STEPS_PER_EPOCH}], "
-                f"Total Loss: {total_loss.numpy():.4f}, "
-                f"Main Loss: {main_loss.numpy():.4f}, "
+                f"Loss: {loss.numpy():.4f}, "
+                f"LR: {current_lr.numpy():.6f}"
             )
-            if USE_AUXILIARY_LOSS:
-                log_msg += f"Aux Loss: {aux_loss.numpy():.4f}, "
-            log_msg += f"LR: {current_lr.numpy():.8f}"
-            logger.info(log_msg)
 
         with summary_writer.as_default():
-            tf.summary.scalar("train_total_loss", total_loss, step=global_step)
-            tf.summary.scalar("train_main_loss", main_loss, step=global_step)
-            tf.summary.scalar("optimizer_lr", current_lr, step=global_step)
+            tf.summary.scalar("training_loss", loss, step=step)
+            tf.summary.scalar("optimizer_lr", current_lr, step=step)
 
-        global_step += 1
+        step += 1
 
-    # Validation
-    val_accuracy, val_loss, val_num_samples, val_recall_pos, val_pos_samples = validate(
-        model, valid_dataset
-    )
+    accuracy, num_samples, recall_pos, pos_samples = validate(model, valid_dataset)
+
     logger.info(
         f"Validation after Epoch {epoch+1}: "
-        f"Val Loss: {val_loss:.4f}, "
-        f"Accuracy: {val_accuracy*100:.2f}%, "
-        f"Total Samples: {val_num_samples}, "
-        f"Positive Recall: {val_recall_pos*100:.2f}%, "
-        f"Positive Samples: {val_pos_samples}"
+        f"Accuracy: {accuracy*100:.2f}%, "
+        f"Total Samples: {num_samples}, "
+        f"Positive Recall: {recall_pos*100:.2f}%, "
+        f"Positive Samples: {pos_samples}"
     )
-    with summary_writer.as_default():
-        tf.summary.scalar("validation_loss", val_loss, step=epoch + 1)
-        tf.summary.scalar("validation_accuracy", val_accuracy, step=epoch + 1)
-        tf.summary.scalar("validation_recall_pos", val_recall_pos, step=epoch + 1)
 
-    # Checkpoint saving
+    with summary_writer.as_default():
+        tf.summary.scalar("validation_accuracy", accuracy, step=epoch + 1)
+        tf.summary.scalar("validation_recall_pos", recall_pos, step=epoch + 1)
+
     if SAVE_CHECKPOINTS:
         ckpt_path = os.path.join(checkpoint_dir, f"dien_epoch_{epoch+1}")
         model.save_weights(ckpt_path)

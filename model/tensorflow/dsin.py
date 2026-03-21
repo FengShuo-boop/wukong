@@ -16,58 +16,68 @@ from tensorflow.keras.initializers import (
     TruncatedNormal,
     GlorotUniform,
     GlorotNormal,
-    Constant,
     Zeros,
 )
 
 from model.tensorflow.embedding import Embedding
 
 
-class PositionEncoding(Layer):
-    def __init__(
-        self, pos_embedding_trainable=True, zero_pad=False, scale=True, **kwargs
-    ):
-        self.pos_embedding_trainable = pos_embedding_trainable
-        self.zero_pad = zero_pad
-        self.scale = scale
-        super(PositionEncoding, self).__init__(**kwargs)
+class BiasEncoding(Layer):
+    def __init__(self, sess_num, sess_len, **kwargs):
+        self.sess_num = sess_num
+        self.sess_len = sess_len
+        super(BiasEncoding, self).__init__(**kwargs)
 
     def build(self, input_shape):
-        # Create a trainable weight variable for this layer.
-        _, T, num_units = input_shape.as_list()  # inputs.get_shape().as_list()
-        # First part of the PE function: sin and cos argument
-        position_enc = np.array(
-            [
-                [
-                    pos / np.power(10000, 2.0 * (i // 2) / num_units)
-                    for i in range(num_units)
-                ]
-                for pos in range(T)
-            ]
+        dim = int(input_shape[-1])
+        # W^K_k : (1, sess_num, 1, 1)
+        self.w_k = self.add_weight(
+            shape=(1, self.sess_num, 1, 1), initializer=GlorotNormal(), name="w_k"
         )
-
-        # Second part, apply the cosine to even columns and sin to odds.
-        position_enc[:, 0::2] = np.sin(position_enc[:, 0::2])  # dim 2i
-        position_enc[:, 1::2] = np.cos(position_enc[:, 1::2])  # dim 2i+1
-        if self.zero_pad:
-            position_enc[0, :] = np.zeros(num_units)
-        self.lookup_table = self.add_weight(
-            "lookup_table",
-            (T, num_units),
-            initializer=Constant(position_enc),
-            trainable=self.pos_embedding_trainable,
+        # W^T_t : (1, 1, sess_len, 1)
+        self.w_t = self.add_weight(
+            shape=(1, 1, self.sess_len, 1), initializer=GlorotNormal(), name="w_t"
         )
+        # W^C_c : (1, 1, 1, dim)
+        self.w_c = self.add_weight(
+            shape=(1, 1, 1, dim), initializer=GlorotNormal(), name="w_c"
+        )
+        super(BiasEncoding, self).build(input_shape)
 
-        # Be sure to call this somewhere!
-        super(PositionEncoding, self).build(input_shape)
+    def call(self, inputs):
+        # inputs shape: (batch_size, sess_num, sess_len, dim)
+        # 根据广播机制实现 Eq.2: BE(k, t, c) = w_k^K + w_t^T + w_c^C
+        return inputs + self.w_k + self.w_t + self.w_c
 
-    def call(self, inputs, mask=None):
-        _, T, num_units = inputs.get_shape().as_list()
-        position_ind = tf.expand_dims(tf.range(T), 0)
-        outputs = tf.nn.embedding_lookup(self.lookup_table, position_ind)
-        if self.scale:
-            outputs = outputs * num_units**0.5
-        return outputs + inputs
+
+class BilinearAttention(Layer):
+    def __init__(self, **kwargs):
+        super(BilinearAttention, self).__init__(**kwargs)
+
+    def build(self, input_shape):
+        # input_shape: [target_shape, seq_shape]
+        # target_shape: (B, 1, dim)
+        # seq_shape: (B, T, dim)
+        dim = int(input_shape[0][-1])
+        # 双线性权重矩阵 W (dim x dim)
+        self.W = self.add_weight(
+            shape=(dim, dim), initializer=GlorotNormal(), name="bilinear_W"
+        )
+        super(BilinearAttention, self).build(input_shape)
+
+    def call(self, inputs, **kwargs):
+        target, seq = inputs
+        # 1. 计算 seq * W => (B, T, dim)
+        seq_w = tf.tensordot(seq, self.W, axes=[[-1], [0]])
+        # 2. 将目标项转置 => (B, dim, 1)
+        target_t = tf.transpose(target, [0, 2, 1])
+        # 3. 内积计算 logits (I_k W X^I) => (B, T, 1)
+        logits = tf.matmul(seq_w, target_t)
+        # 4. softmax 归一化注意力权重
+        scores = tf.nn.softmax(logits, axis=1)
+        # 5. 加权求和 (B, 1, T) x (B, T, dim) => (B, 1, dim)
+        output = tf.matmul(scores, seq, transpose_a=True)
+        return output
 
 
 class LocalActivationUnit(Layer):
@@ -285,131 +295,6 @@ class DNN(Layer):
         return deep_input
 
 
-class AttentionSequencePoolingLayer(Layer):
-    """The Attentional sequence pooling operation used in DIN.
-
-    Input shape
-      - A list of three tensor: [query,keys,keys_length]
-
-      - query is a 3D tensor with shape:  ``(batch_size, 1, embedding_size)``
-
-      - keys is a 3D tensor with shape:   ``(batch_size, T, embedding_size)``
-
-      - keys_length is a 2D tensor with shape: ``(batch_size, 1)``
-
-    Output shape
-      - 3D tensor with shape: ``(batch_size, 1, embedding_size)``.
-
-    Arguments
-      - **att_hidden_units**:list of positive integer, the attention net layer number and units in each layer.
-
-      - **att_activation**: Activation function to use in attention net.
-
-      - **weight_normalization**: bool.Whether normalize the attention score of local activation unit.
-
-      - **supports_masking**:If True,the input need to support masking.
-
-    References
-      - [Zhou G, Zhu X, Song C, et al. Deep interest network for click-through rate prediction[C]//Proceedings of the 24th ACM SIGKDD International Conference on Knowledge Discovery & Data Mining. ACM, 2018: 1059-1068.](https://arxiv.org/pdf/1706.06978.pdf)
-    """
-
-    def __init__(
-        self,
-        att_hidden_units=(80, 40),
-        att_activation="sigmoid",
-        weight_normalization=False,
-        return_score=False,
-        supports_masking=False,
-        **kwargs
-    ):
-        self.att_hidden_units = att_hidden_units
-        self.att_activation = att_activation
-        self.weight_normalization = weight_normalization
-        self.return_score = return_score
-        super(AttentionSequencePoolingLayer, self).__init__(**kwargs)
-        self.supports_masking = supports_masking
-
-    def build(self, input_shape):
-        if not self.supports_masking:
-            if not isinstance(input_shape, list) or len(input_shape) != 3:
-                raise ValueError(
-                    "A `AttentionSequencePoolingLayer` layer should be called "
-                    "on a list of 3 inputs"
-                )
-
-            if (
-                len(input_shape[0]) != 3
-                or len(input_shape[1]) != 3
-                or len(input_shape[2]) != 2
-            ):
-                raise ValueError(
-                    "Unexpected inputs dimensions,the 3 tensor dimensions are %d,%d and %d , expect to be 3,3 and 2"
-                    % (len(input_shape[0]), len(input_shape[1]), len(input_shape[2]))
-                )
-
-            if (
-                input_shape[0][-1] != input_shape[1][-1]
-                or input_shape[0][1] != 1
-                or input_shape[2][1] != 1
-            ):
-                raise ValueError(
-                    "A `AttentionSequencePoolingLayer` layer requires "
-                    "inputs of a 3 tensor with shape (None,1,embedding_size),(None,T,embedding_size) and (None,1)"
-                    "Got different shapes: %s" % (input_shape)
-                )
-        else:
-            pass
-        self.local_att = LocalActivationUnit(
-            self.att_hidden_units,
-            self.att_activation,
-            l2_reg=0,
-            dropout_rate=0,
-            use_bn=False,
-            seed=1024,
-        )
-        super(AttentionSequencePoolingLayer, self).build(
-            input_shape
-        )  # Be sure to call this somewhere!
-
-    def call(self, inputs, mask=None, training=None, **kwargs):
-        if self.supports_masking:
-            if mask is None:
-                raise ValueError(
-                    "When supports_masking=True,input must support masking"
-                )
-            queries, keys = inputs
-            key_masks = tf.expand_dims(mask[-1], axis=1)
-
-        else:
-            queries, keys, keys_length = inputs
-            hist_len = keys.get_shape()[1]
-            key_masks = tf.sequence_mask(keys_length, hist_len)
-
-        attention_score = self.local_att([queries, keys], training=training)
-
-        outputs = tf.transpose(attention_score, (0, 2, 1))
-
-        if self.weight_normalization:
-            paddings = tf.ones_like(outputs) * (-(2**32) + 1)
-        else:
-            paddings = tf.zeros_like(outputs)
-
-        outputs = tf.where(key_masks, outputs, paddings)
-
-        if self.weight_normalization:
-            outputs = tf.nn.softmax(outputs)
-
-        if not self.return_score:
-            outputs = tf.matmul(outputs, keys)
-
-        if tf.__version__ < "1.13.0":
-            outputs._uses_learning_phase = attention_score._uses_learning_phase
-        else:
-            outputs._uses_learning_phase = training is not None
-
-        return outputs
-
-
 class BiLSTM(Layer):
     """A multiple layer Bidirectional Residual LSTM Layer.
 
@@ -561,10 +446,10 @@ class Transformer(Layer):
         att_embedding_size=1,
         head_num=8,
         dropout_rate=0.0,
-        use_positional_encoding=True,
+        use_positional_encoding=False,
         use_res=True,
         use_feed_forward=True,
-        use_layer_norm=False,
+        use_layer_norm=True,  # 修复 2：默认开启 layernorm
         blinding=True,
         seed=1024,
         supports_masking=False,
@@ -647,10 +532,6 @@ class Transformer(Layer):
 
         self.dropout = Dropout(self.dropout_rate, seed=self.seed)
         self.ln = LayerNormalization()
-        if self.use_positional_encoding:
-            self.query_pe = PositionEncoding()
-            self.key_pe = PositionEncoding()
-        # Be sure to call this somewhere!
         super(Transformer, self).build(input_shape)
 
     def call(self, inputs, mask=None, training=None, **kwargs):
@@ -800,6 +681,8 @@ class DSIN(tf.keras.Model):
         self.dim = dim
 
         self.embedding = Embedding(num_sparse_embs, dim, dim_input_dense, bias)
+        # 修复 1：Bias Encoding
+        self.bias_encoding = BiasEncoding(sess_num, sess_len)
 
         # 1. Session Interest Extractor Layer (Transformer)
         # 用于提取单个 session 内的行为偏好
@@ -807,7 +690,7 @@ class DSIN(tf.keras.Model):
         self.transformer = Transformer(
             att_embedding_size=att_embedding_size,
             head_num=head_num,
-            use_positional_encoding=True,  # Bias Encoding
+            use_positional_encoding=False,  # Bias Encoding
             blinding=False,
             supports_masking=False,
             output_type="mean",  # Pooling 聚合为一个向量
@@ -817,10 +700,10 @@ class DSIN(tf.keras.Model):
         # 捕捉多个 session 之间的演化关系
         self.bilstm = BiLSTM(units=dim // 2, layers=1, merge_mode="concat")
 
-        # 3. Session Interest Activating Layer (Attention Sequence Pooling)
-        # 分别与基础 session 兴趣和演化兴趣进行 Local Activation
-        self.sess_att_layer = AttentionSequencePoolingLayer(supports_masking=False)
-        self.lstm_att_layer = AttentionSequencePoolingLayer(supports_masking=False)
+        # 3. Session Interest Activating Layer
+        # 修复 3：符合公式的 BilinearAttention 层
+        self.sess_att_layer = BilinearAttention()
+        self.lstm_att_layer = BilinearAttention()
 
         # 4. MLP Layer
         self.dnn = DNN(hidden_units=dnn_hidden_units, activation="relu", use_bn=True)
@@ -846,6 +729,8 @@ class DSIN(tf.keras.Model):
 
         # ========= 1. Session Division =========
         # 将输入序列切分为多个 session: (batch * sess_num, sess_len, dim)
+        sess_input = tf.reshape(seq_input, (-1, self.sess_num, self.sess_len, self.dim))
+        seq_input = self.bias_encoding(sess_input)
         sess_input = tf.reshape(seq_input, (-1, self.sess_len, self.dim))
 
         # 构造 Transformer 所需的 mask 长度 (全满)
@@ -866,16 +751,9 @@ class DSIN(tf.keras.Model):
         lstm_interest = self.bilstm(sess_interest, training=training)
 
         # ========= 4. Session Interest Activating =========
-        # 构造 AttentionSequencePoolingLayer 所需的 session 数量长度
-        sess_num_tensor = tf.ones((batch_size, 1), dtype=tf.int32) * self.sess_num
-
         # 计算 Target 对各 session 的注意力加权，输出均为: (batch, 1, dim)
-        sess_att = self.sess_att_layer(
-            [target_input, sess_interest, sess_num_tensor], training=training
-        )
-        lstm_att = self.lstm_att_layer(
-            [target_input, lstm_interest, sess_num_tensor], training=training
-        )
+        sess_att = self.sess_att_layer([target_input, sess_interest], training=training)
+        lstm_att = self.lstm_att_layer([target_input, lstm_interest], training=training)
 
         # ========= 5. Feature Concat & MLP =========
         # 拼接 Target、提取兴趣、演化兴趣: (batch, 1, 3 * dim)

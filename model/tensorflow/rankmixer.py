@@ -112,8 +112,8 @@ class PerTokenSparseMoE(Layer):
     def build(self, input_shape):
         hidden_dim = self.num_D * self.expansion_ratio
         init = tf.keras.initializers.VarianceScaling(
-            scale=2.0,  # TF1 默认的 factor 是 2.0 (用于 ReLU 等)
-            mode="fan_in",  # 保持权重方差一致
+            scale=2.0,
+            mode="fan_in",
             distribution="truncated_normal",
         )
         self.W1 = self.add_weight(
@@ -160,12 +160,9 @@ class PerTokenSparseMoE(Layer):
         super(PerTokenSparseMoE, self).build(input_shape)
 
     def _router_logits(self, x, w, b):
-        # 每个 token 的路由 logits，用于专家选择。
         return tf.einsum("btd,tde->bte", x, w) + b
 
     def call(self, x, training=False):
-        # x 形状: [B, T, D]
-        # 计算每个 token 的专家输出。
         h = tf.einsum("btd,tedh->bteh", x, self.W1) + self.b1
         h = gelu(h)
         if self.dropout and training:
@@ -176,7 +173,6 @@ class PerTokenSparseMoE(Layer):
 
         gate_train_logits = self._router_logits(x, self.gate_w_train, self.gate_b_train)
         if self.routing_type == "relu_dtsi":
-            # 训练阶段使用 soft 路由以提高专家覆盖。
             gate_train = tf.nn.softmax(gate_train_logits, axis=-1)
         elif self.routing_type == "relu":
             gate_train = tf.nn.relu(gate_train_logits)
@@ -184,7 +180,6 @@ class PerTokenSparseMoE(Layer):
             raise ValueError("Unsupported routing_type: %s" % self.routing_type)
 
         if self.use_dtsi:
-            # 推理阶段使用 ReLU gate 以获得稀疏激活。
             gate_infer_logits = self._router_logits(
                 x, self.gate_w_infer, self.gate_b_infer
             )
@@ -192,8 +187,16 @@ class PerTokenSparseMoE(Layer):
         else:
             gate_infer = gate_train
 
-        # 训练/推理选择不同 gate。
         gate = gate_train if training else gate_infer
+
+        # 修复点2：计算并添加 MoE 引导稀疏性的 L1 正则化损失
+        if training and self.l1_coef > 0.0:
+            # 计算每个 batch 中 router 权重的 L1 loss 并累加
+            l1_loss = self.l1_coef * tf.reduce_mean(
+                tf.reduce_sum(tf.abs(gate_train), axis=-1)
+            )
+            self.add_loss(l1_loss)
+
         y = tf.reduce_sum(expert_out * tf.expand_dims(gate, -1), axis=2)
         return y
 
@@ -264,8 +267,9 @@ class RankMixer(Layer):
                     name=f"rankmixer_layer_{i}",
                 )
             )
+        # 修复点1：由于改用了 mean pooling，因此 MLP 的输入维度应该是 dim_emb，而不是 num_tokens * dim_emb
         self.projection_head = MLP(
-            num_tokens * dim_emb,
+            dim_emb,
             num_hidden_head,
             dim_hidden_head,
             dim_output,
@@ -283,6 +287,44 @@ class RankMixer(Layer):
         x = self.semantic_tokenization(x)
         for i, layer in enumerate(self.layers_list):
             x = layer(x)
-        x = tf.reshape(x, (-1, self.num_tokens * self.dim_emb))
+        # 修复点1：使用 mean pooling 还原论文中的结构
+        x = tf.reduce_mean(x, axis=1)
         x = self.projection_head(x)
         return x
+
+
+if __name__ == "__main__":
+    # 简单测试 RankMixer 层的前向传播。
+    batch_size = 4
+    num_sparse_embs = [1000, 1000, 1000]
+    num_tokens = 8
+    dim_input_sparse = len(num_sparse_embs)
+    dim_input_dense = 10
+    dim_emb = 16
+    num_heads = num_tokens
+    expansion_ratio = 4
+    num_hidden_head = 64
+    dim_hidden_head = 32
+    dim_output = 1
+
+    model = RankMixer(
+        num_layers=2,
+        num_sparse_embs=num_sparse_embs,
+        num_tokens=num_tokens,
+        dim_input_sparse=dim_input_sparse,
+        dim_input_dense=dim_input_dense,
+        dim_emb=dim_emb,
+        num_heads=num_heads,
+        expansion_ratio=expansion_ratio,
+        num_hidden_head=num_hidden_head,
+        dim_hidden_head=dim_hidden_head,
+        dim_output=dim_output,
+        dropout=0.1,
+    )
+
+    sparse_inputs = tf.random.uniform(
+        (batch_size, dim_input_sparse), maxval=1000, dtype=tf.int32
+    )
+    dense_inputs = tf.random.normal((batch_size, dim_input_dense))
+    outputs = model((sparse_inputs, dense_inputs))
+    print("Output shape:", outputs.shape)

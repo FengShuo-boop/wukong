@@ -1,195 +1,133 @@
-from typing import List
+import numpy as np
+import itertools
 import tensorflow as tf
-from tensorflow.python.keras.layers import Layer, MaxPooling2D, Conv2D, Dense, Flatten
-from tensorflow.keras import backend as K
-from tensorflow.python.layers import utils
+from tensorflow.keras.layers import (
+    Layer,
+    Conv2D,
+    MaxPooling2D,
+    Dense,
+    Flatten,
+    Dropout,
+    BatchNormalization,
+)
 
 from model.tensorflow.embedding import Embedding
-from model.tensorflow.mlp import MLP
+
+
+class InnerProductLayer(Layer):
+    """实现 IPNN 的两两特征内积交互"""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    def call(self, inputs):
+        # inputs shape: (batch_size, num_fields, dim_emb)
+        num_fields = inputs.shape[1]
+        inner_products = []
+        for i, j in itertools.combinations(range(num_fields), 2):
+            # dot product: (batch, dim_emb) * (batch, dim_emb) -> (batch, 1)
+            dot = tf.reduce_sum(
+                inputs[:, i, :] * inputs[:, j, :], axis=1, keepdims=True
+            )
+            inner_products.append(dot)
+        return tf.concat(inner_products, axis=1)
 
 
 class FGCNNLayer(Layer):
-    """Feature Generation Layer used in FGCNN,including Convolution,MaxPooling and Recombination.
-
-    Input shape
-      - A 3D tensor with shape:``(batch_size,field_size,embedding_size)``.
-
-    Output shape
-      - 3D tensor with shape: ``(batch_size,new_feture_num,embedding_size)``.
-
-    References
-      - [Liu B, Tang R, Chen Y, et al. Feature Generation by Convolutional Neural Network for Click-Through Rate Prediction[J]. arXiv preprint arXiv:1904.04447, 2019.](https://arxiv.org/pdf/1904.04447)
-
-    """
-
-    def __init__(
-        self,
-        filters=(
-            14,
-            16,
-        ),
-        kernel_width=(
-            7,
-            7,
-        ),
-        new_maps=(
-            3,
-            3,
-        ),
-        pooling_width=(2, 2),
-        **kwargs,
-    ):
-        if not (
-            len(filters) == len(kernel_width) == len(new_maps) == len(pooling_width)
-        ):
-            raise ValueError("length of argument must be equal")
-        self.filters = filters
-        self.kernel_width = kernel_width
-        self.new_maps = new_maps
-        self.pooling_width = pooling_width
-
-        super(FGCNNLayer, self).__init__(**kwargs)
+    def __init__(self, filters, kernel_size, pooling_size, recombination_dim):
+        super().__init__()
+        self.conv = Conv2D(
+            filters=filters,
+            kernel_size=(kernel_size, 1),
+            padding="same",
+            activation="tanh",
+        )
+        self.pool = MaxPooling2D(pool_size=(pooling_size, 1))
+        self.recombination_dim = recombination_dim
 
     def build(self, input_shape):
-        if len(input_shape) != 3:
-            raise ValueError(
-                "Unexpected inputs dimensions %d, expect to be 3 dimensions"
-                % (len(input_shape))
-            )
-        self.conv_layers = []
-        self.pooling_layers = []
-        self.dense_layers = []
-        pooling_shape = input_shape.as_list() + [
-            1,
-        ]
-        embedding_size = int(input_shape[-1])
-        for i in range(1, len(self.filters) + 1):
-            filters = self.filters[i - 1]
-            width = self.kernel_width[i - 1]
-            new_filters = self.new_maps[i - 1]
-            pooling_width = self.pooling_width[i - 1]
-            conv_output_shape = self._conv_output_shape(pooling_shape, (width, 1))
-            pooling_shape = self._pooling_output_shape(
-                conv_output_shape, (pooling_width, 1)
-            )
-            self.conv_layers.append(
-                Conv2D(
-                    filters=filters,
-                    kernel_size=(width, 1),
-                    strides=(1, 1),
-                    padding="same",
-                    activation="tanh",
-                    use_bias=True,
-                )
-            )
-            self.pooling_layers.append(MaxPooling2D(pool_size=(pooling_width, 1)))
-            self.dense_layers.append(
-                Dense(
-                    pooling_shape[1] * embedding_size * new_filters,
-                    activation="tanh",
-                    use_bias=True,
-                )
-            )
+        # input_shape: (batch, h, w, c)
+        self.recombine_fc = Dense(self.recombination_dim, activation="tanh")
+        super().build(input_shape)
 
-        self.flatten = Flatten()
-
-        super(FGCNNLayer, self).build(input_shape)  # Be sure to call this somewhere!
-
-    def call(self, inputs, **kwargs):
-        if K.ndim(inputs) != 3:
-            raise ValueError(
-                "Unexpected inputs dimensions %d, expect to be 3 dimensions"
-                % (K.ndim(inputs))
-            )
-
-        embedding_size = int(inputs.shape[-1])
-        pooling_result = tf.expand_dims(inputs, axis=3)
-
-        new_feature_list = []
-
-        for i in range(1, len(self.filters) + 1):
-            new_filters = self.new_maps[i - 1]
-
-            conv_result = self.conv_layers[i - 1](pooling_result)
-
-            pooling_result = self.pooling_layers[i - 1](conv_result)
-
-            flatten_result = self.flatten(pooling_result)
-
-            new_result = self.dense_layers[i - 1](flatten_result)
-
-            new_feature_list.append(
-                tf.reshape(
-                    new_result,
-                    (-1, int(pooling_result.shape[1]) * new_filters, embedding_size),
-                )
-            )
-
-        new_features = tf.concat(new_feature_list, axis=1)
-        return new_features
-
-    def _conv_output_shape(self, input_shape, kernel_size):
-        # channels_last
-        space = input_shape[1:-1]
-        new_space = []
-        for i in range(len(space)):
-            new_dim = utils.conv_output_length(
-                space[i], kernel_size[i], padding="same", stride=1, dilation=1
-            )
-            new_space.append(new_dim)
-        return [input_shape[0]] + new_space + [self.filters]
-
-    def _pooling_output_shape(self, input_shape, pool_size):
-        # channels_last
-
-        rows = input_shape[1]
-        cols = input_shape[2]
-        rows = utils.conv_output_length(rows, pool_size[0], "valid", pool_size[0])
-        cols = utils.conv_output_length(cols, pool_size[1], "valid", pool_size[1])
-        return [input_shape[0], rows, cols, input_shape[3]]
+    def call(self, inputs):
+        x = self.conv(inputs)
+        x = self.pool(x)
+        # Recombination: 拉平后生成新特征
+        new_feat = Flatten()(x)
+        new_feat = self.recombine_fc(new_feat)
+        return x, new_feat
 
 
 class FGCNN(tf.keras.Model):
     def __init__(
         self,
-        num_layers: int,
-        num_sparse_embs: List[int],
-        dim_input_dense: int,
-        dim_emb: int,
-        num_hidden_head: int,
-        dim_hidden_head: int,
-        dim_output: int,
-        dropout: float = 0.0,
-        bias: bool = False,
-        **kwargs,
+        num_sparse_embs,
+        dim_input_dense,
+        dim_emb,
+        num_layers=2,
+        filters=8,
+        kernel_size=7,
+        pooling_size=2,
     ):
-        super().__init__(**kwargs)
-        self.embedding = Embedding(num_sparse_embs, dim_emb, dim_input_dense, bias)
-        self.dim_emb = dim_emb
+        super().__init__()
+        # 1. 双 Embedding 机制
+        self.emb_generation = Embedding(num_sparse_embs, dim_emb, dim_input_dense)
+        self.emb_classifier = Embedding(num_sparse_embs, dim_emb, dim_input_dense)
 
-        self.blocks = [FGCNNLayer() for _ in range(num_layers)]
-        self.projection_head = MLP(
-            dim_emb,
-            num_hidden_head,
-            dim_hidden_head,
-            dim_output,
-            dropout,
-            bias,
+        # 2. Feature Generation 模块
+        self.fg_blocks = []
+        for _ in range(num_layers):
+            self.fg_blocks.append(
+                FGCNNLayer(
+                    filters, kernel_size, pooling_size, recombination_dim=dim_emb * 3
+                )
+            )
+
+        # 3. Deep Classifier (IPNN)
+        self.inner_product = InnerProductLayer()
+        self.fc_layers = tf.keras.Sequential(
+            [
+                Dense(128, activation="relu"),
+                BatchNormalization(),
+                Dropout(0.2),
+                Dense(1, activation="sigmoid"),
+            ]
         )
 
     def call(self, inputs):
         sparse_inputs, dense_inputs = inputs
-        x = self.embedding(sparse_inputs, dense_inputs)
-        for block in self.blocks:
-            x = block(x)
-        x = tf.reduce_mean(x, axis=1)
-        x = self.projection_head(x)
-        return x
+        embs_gen = self.emb_generation(sparse_inputs, dense_inputs)
+        embs_cls = self.emb_classifier(sparse_inputs, dense_inputs)
+
+        # CNN Feature Generation
+        curr_x = tf.expand_dims(embs_gen, axis=-1)  # (batch, num_fields, dim_emb, 1)
+        all_new_features = []
+        for block in self.fg_blocks:
+            curr_x, new_feat = block(curr_x)
+            all_new_features.append(new_feat)
+
+        # 拼接所有生成的新特征
+        generated_features = tf.concat(all_new_features, axis=1)
+        # 将生成特征 reshape 回 (batch, N, dim_emb) 以便进行交互
+        batch_size = tf.shape(generated_features)[0]
+        generated_features = tf.reshape(
+            generated_features, (batch_size, -1, embs_cls.shape[-1])
+        )
+
+        # 4. 拼接原始特征与生成特征
+        augmented_space = tf.concat([embs_cls, generated_features], axis=1)
+
+        # 5. Classifier: 内积 + MLP
+        ip_out = self.inner_product(augmented_space)
+        flat_aug = Flatten()(augmented_space)
+        classifier_input = tf.concat([ip_out, flat_aug], axis=1)
+
+        return self.fc_layers(classifier_input)
 
 
+# --- 测试运行 ---
 if __name__ == "__main__":
-    import numpy as np
-
     BATCH_SIZE = 2
     NUM_SPARSE_EMBS = [
         1460,
@@ -219,19 +157,14 @@ if __name__ == "__main__":
         105,
         142572,
     ]
-    DIM_INPUT_SPARSE = 26
     DIM_INPUT_DENSE = 13
-    # Example usage
+    DIM_INPUT_SPARSE = 26
+    SESS_NUM = 3
+    SESS_LEN = 13
+    DIM = 128
     model = FGCNN(
-        num_layers=2,
-        num_sparse_embs=NUM_SPARSE_EMBS,
-        dim_input_dense=13,
-        dim_emb=128,
-        num_hidden_head=2,
-        dim_hidden_head=128,
-        dim_output=1,
+        num_sparse_embs=NUM_SPARSE_EMBS, dim_input_dense=DIM_INPUT_DENSE, dim_emb=DIM
     )
-
     sparse_inputs = tf.constant(
         np.column_stack(
             [
@@ -243,5 +176,6 @@ if __name__ == "__main__":
     dense_inputs = tf.constant(
         np.random.rand(BATCH_SIZE, DIM_INPUT_DENSE).astype(np.float32)
     )
-    outputs = model((sparse_inputs, dense_inputs))
-    print("Model output shape:", outputs.shape)
+    output = model((sparse_inputs, dense_inputs))
+    print("Output shape:", output.shape)  # 应为 (2, 1)
+    model.summary()
