@@ -5,17 +5,16 @@ from tensorflow.keras.regularizers import l2
 from tensorflow.keras.initializers import TruncatedNormal
 from tensorflow.keras import backend as K
 
-from model.tensorflow.embedding import Embedding
-from model.tensorflow.mlp import MLP
+from model.tensorflow.embedding import Embedding, SparseEmbedding
 
 
 class FwFMLayer(Layer):
-    """Field-weighted Factorization Machines
+    """Field-weighted Factorization Machines (Interaction Terms only)
 
-    Optimized Vectorized Implementation.
+    计算 FwFM 的纯二阶交叉项。
 
     Input shape
-      - 3D tensor with shape: ``(batch_size,field_size,embedding_size)``.
+      - 3D tensor with shape: ``(batch_size, field_size, embedding_size)``.
 
     Output shape
       - 2D tensor with shape: ``(batch_size, 1)``.
@@ -29,15 +28,13 @@ class FwFMLayer(Layer):
     def build(self, input_shape):
         if len(input_shape) != 3:
             raise ValueError(
-                "Unexpected inputs dimensions % d,\
-                             expect to be 3 dimensions"
+                "Unexpected inputs dimensions %d, expect to be 3 dimensions"
                 % (len(input_shape))
             )
 
         if input_shape[1] != self.num_fields:
             raise ValueError(
-                "Mismatch in number of fields {} and \
-                 concatenated embeddings dims {}".format(
+                "Mismatch in number of fields {} and concatenated embeddings dims {}".format(
                     self.num_fields, input_shape[1]
                 )
             )
@@ -59,33 +56,20 @@ class FwFMLayer(Layer):
                 % (K.ndim(inputs))
             )
 
-        if inputs.shape[1] != self.num_fields:
-            raise ValueError(
-                "Mismatch in number of fields {} and \
-                 concatenated embeddings dims {}".format(
-                    self.num_fields, inputs.shape[1]
-                )
-            )
-
-        # 1. 批量计算所有域特征两两之间的点积 (Batch Matrix Multiplication)
-        # inputs shape: (batch_size, num_fields, embedding_size)
-        # inner_products shape: (batch_size, num_fields, num_fields)
+        # 1. 批量计算所有域特征两两之间的点积
         inner_products = tf.matmul(inputs, inputs, transpose_b=True)
 
-        # 2. 创建一个严格的"上三角掩码" (Upper triangular mask)
-        # 这是为了等效替代 itertools.combinations (仅保留 i < j 的组合)
+        # 2. 创建上三角掩码 (等效于 itertools.combinations i < j)
         ones = tf.ones((self.num_fields, self.num_fields), dtype=inputs.dtype)
         mask = tf.linalg.band_part(ones, 0, -1) - tf.linalg.band_part(ones, 0, 0)
 
-        # 3. 将权重矩阵应用掩码，只保留右上角的权重 (i < j 的 r_ij)
-        # r_ij shape: (num_fields, num_fields)
+        # 3. 将权重矩阵应用掩码
         r_ij = self.field_strengths * mask
 
-        # 4. 用两两点积结果乘上对应的域权重 (利用 Broadcasting 机制)
+        # 4. 点积结果乘以对应的域对权重 r_{F(i), F(j)}
         weighted_products = inner_products * r_ij
 
-        # 5. 将所有交叉结果求和
-        # 对 num_fields 所在的维度(axis=1, 2)进行累加，保持 keepdims=True 使得输出为 (batch_size, 1)
+        # 5. 求和，输出维度降至 (batch_size, 1)
         sum_ = tf.reduce_sum(weighted_products, axis=[1, 2])
         out = tf.expand_dims(sum_, axis=-1)
 
@@ -93,40 +77,57 @@ class FwFMLayer(Layer):
 
 
 class FwFM(Layer):
+    """
+    完整的 FwFM 模型结构，严格对齐论文：
+    Prediction = Bias + Linear_Terms + FwFM_Interaction_Terms
+    """
+
     def __init__(
         self,
-        num_layers: int,
         num_sparse_embs: List[int],
         dim_input_sparse: int,
         dim_input_dense: int,
         dim_emb: int,
-        dropout: float = 0.0,
-        bias: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
-        self.embedding = Embedding(num_sparse_embs, dim_emb, dim_input_dense, bias)
-        self.layers = []
-        for _ in range(num_layers):
-            self.layers.append(
-                MLP(
-                    dim_emb,
-                    2,
-                    dim_emb,
-                    dim_emb,
-                    dropout,
-                    bias,
-                )
-            )
-        self.projection_head = FwFMLayer(dim_input_dense + dim_input_sparse, 0.00001)
+        self.dim_input_sparse = dim_input_sparse
+        self.dim_input_dense = dim_input_dense
+
+        # 二阶交叉项组件
+        self.embedding = Embedding(num_sparse_embs, dim_emb, dim_input_dense)
+        self.interaction_layer = FwFMLayer(
+            num_fields=dim_input_dense + dim_input_sparse
+        )
+
+        # 一阶线性项组件 (FwFMs_LW 形式)
+        self.linear_sparse = SparseEmbedding(num_sparse_embs, dim_emb=1)
+        self.linear_dense = tf.keras.layers.Dense(units=1, use_bias=False)
+
+        # 全局偏置组件
+        self.global_bias = self.add_weight(
+            name="global_bias", shape=(1,), initializer="zeros", trainable=True
+        )
 
     def call(self, inputs):
         sparse_inputs, dense_inputs = inputs
-        x = self.embedding(sparse_inputs, dense_inputs)
-        for layer in self.layers:
-            x = layer(x)
-        x = self.projection_head(x)
-        return x
+
+        # 1. 计算二阶交叉项 (Interaction terms)
+        # emb_x shape: (batch_size, num_fields, dim_emb)
+        emb_x = self.embedding(sparse_inputs, dense_inputs)
+        # interaction_term shape: (batch_size, 1)
+        interaction_term = self.interaction_layer(emb_x)
+
+        # 2. 计算一阶线性项 (Linear terms)
+        # 稀疏特征的一阶输出 shape: (batch_size, num_sparse_fields, 1) -> sum 为 (batch_size, 1)
+        sparse_linear = tf.reduce_sum(self.linear_sparse(sparse_inputs), axis=1)
+        # 稠密特征的一阶输出 shape: (batch_size, 1)
+        dense_linear = self.linear_dense(dense_inputs)
+        linear_term = sparse_linear + dense_linear
+
+        # 3. 汇总合并输出
+        out = self.global_bias + linear_term + interaction_term
+        return out
 
 
 if __name__ == "__main__":
@@ -164,12 +165,10 @@ if __name__ == "__main__":
     DIM_INPUT_SPARSE = 26
     DIM_INPUT_DENSE = 13
     model = FwFM(
-        num_layers=2,
         num_sparse_embs=NUM_SPARSE_EMBS,
         dim_input_sparse=DIM_INPUT_SPARSE,
         dim_input_dense=DIM_INPUT_DENSE,
         dim_emb=128,
-        dropout=0.2,
     )
 
     sparse_inputs = tf.constant(

@@ -88,17 +88,18 @@ NUM_SPARSE_EMBS = [
     105,
     142572,
 ]
-DIM_OUTPUT = 1
 
 ####################################################################################################
 #                                   MODEL SPECIFIC CONFIGURATION                                   #
 ####################################################################################################
-LS = 16
-LNS = 16
+NUM_LAYERS = 3
+LS = 26
+LNS = 13
 DIM_EMB = 128
 NUM_HEADS = (
     16  # number of attention heads in the token mixer（H in the paper）H must same as T
 )
+D_FF = 512
 NUM_HIDDEN_HEAD = 2
 DIM_HIDDEN_HEAD = 256
 DROPOUT = 0.5
@@ -109,18 +110,15 @@ GRAD_MAX_NORM = 1.0
 #                                           CREATE MODEL                                           #
 ####################################################################################################
 model = OneTrans(
+    num_layers=NUM_LAYERS,
     LS=LS,
     LNS=LNS,
     dim_emb=DIM_EMB,
     num_heads=NUM_HEADS,
-    d_ff=NUM_HEADS * DIM_EMB,
+    d_ff=D_FF,
     num_sparse_embs=NUM_SPARSE_EMBS,
-    dim_input_dense=NUM_DENSE_FEATURES,
     num_hidden_head=NUM_HIDDEN_HEAD,
     dim_hidden_head=DIM_HIDDEN_HEAD,
-    dim_output=DIM_OUTPUT,
-    dropout=DROPOUT,
-    bias=BIAS,
 )
 
 ####################################################################################################
@@ -128,62 +126,36 @@ model = OneTrans(
 ####################################################################################################
 BATCH_SIZE = 4096
 TRAIN_EPOCHS = 10
-PEAK_LR = 0.004
-INIT_LR = 1e-8
-TOTAL_STEPS_PER_EPOCH = 39291958 // BATCH_SIZE
-TOTAL_ITERS = TOTAL_STEPS_PER_EPOCH
+LEARNING_RATE = 0.001
 
-lr_schedule = LinearWarmup(
-    initial_learning_rate=INIT_LR, peak_learning_rate=PEAK_LR, warmup_steps=TOTAL_ITERS
-)
-embedding_optimizer = tf.keras.optimizers.SGD(learning_rate=lr_schedule)
-other_optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
+optimizer = tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE)
 criterion = tf.keras.losses.BinaryCrossentropy(from_logits=True)
 
 ####################################################################################################
 #                                       CREATE DATALOADER                                          #
 ####################################################################################################
-
 train_dataset = get_dataset(
     npz_file_path=NPZ_FILE_PATH,
     split="train",
     batch_size=BATCH_SIZE,
     shuffle=True,
 )
-
 valid_dataset = get_dataset(
     npz_file_path=NPZ_FILE_PATH,
     split="valid",
     batch_size=BATCH_SIZE,
     shuffle=False,
 )
+logger.info(
+    "Successfully loaded training and validation datasets from " + NPZ_FILE_PATH
+)
 
 ####################################################################################################
-#                                    BUILD MODEL & SEPARATE VARS                                   #
+#                                    BUILD MODEL WITH DUMMY INPUT                                  #
 ####################################################################################################
-# TF Lazy Execution
 dummy_sparse = tf.zeros((1, NUM_CAT_FEATURES), dtype=tf.int32)
 dummy_dense = tf.zeros((1, NUM_DENSE_FEATURES), dtype=tf.float32)
 _ = model((dummy_sparse, dummy_dense))
-
-embedding_parameters = []
-other_parameters = []
-
-for var in model.trainable_variables:
-    if hasattr(var, "path"):
-        # path is available in TF 2.13+
-        if "sparse_embedding" in var.path and "embeddings" in var.name:
-            embedding_parameters.append(var)
-        else:
-            other_parameters.append(var)
-    else:
-        if "sparse_embedding" in var.name:
-            embedding_parameters.append(var)
-        else:
-            other_parameters.append(var)
-
-logger.info(f"Number of embedding parameters: {len(embedding_parameters)}")
-logger.info(f"Number of other parameters: {len(other_parameters)}")
 
 
 ####################################################################################################
@@ -191,30 +163,29 @@ logger.info(f"Number of other parameters: {len(other_parameters)}")
 ####################################################################################################
 def validate(model, dataset):
     num_samples = 0
-    num_correct = 0
-    pos_samples = 0
-    pos_correct = 0
+    total_logloss = 0.0
+    num_batches = 0
+    auc_metric = tf.keras.metrics.AUC(from_logits=True, name="val_auc")
 
     for inputs, labels in dataset:
         outputs = model(inputs, training=False)
-
         labels = tf.cast(labels, tf.float32)
         outputs = tf.squeeze(outputs)
 
-        predictions = tf.cast(outputs >= 0, tf.float32)
+        # Calculate batch Logloss
+        batch_loss = criterion(labels, outputs)
+        total_logloss += batch_loss.numpy()
+        num_batches += 1
 
+        # Update AUC metric
+        auc_metric.update_state(labels, outputs)
         num_samples += labels.shape[0]
-        pos_samples += tf.reduce_sum(labels).numpy()
 
-        correct_preds = tf.cast(tf.equal(predictions, labels), tf.float32)
-        num_correct += tf.reduce_sum(correct_preds).numpy()
-
-        pos_mask = tf.equal(labels, 1.0)
-        pos_correct += tf.reduce_sum(tf.boolean_mask(predictions, pos_mask)).numpy()
-
-    accuracy = num_correct / num_samples if num_samples > 0 else 0
-    recall_pos = pos_correct / pos_samples if pos_samples > 0 else 0
-    return accuracy, num_samples, recall_pos, pos_samples
+    # Compute final metrics
+    avg_logloss = total_logloss / num_batches if num_batches > 0 else 0.0
+    auc_score = auc_metric.result().numpy()
+    auc_metric.reset_states()
+    return avg_logloss, auc_score, num_samples
 
 
 ####################################################################################################
@@ -225,85 +196,53 @@ def train_step(inputs, labels):
     with tf.GradientTape() as tape:
         outputs = model(inputs, training=True)
         loss = criterion(labels, tf.squeeze(outputs))
-
+        if model.losses:
+            loss += tf.add_n(model.losses)
+    # Compute gradients and update parameters
     grads = tape.gradient(loss, model.trainable_variables)
-    emb_grads = []
-    other_grads = []
-
-    # 梯度裁剪
-    clipped_grads = []
-    for grad in grads:
-        if grad is not None:
-            clipped_grad = tf.clip_by_norm(grad, GRAD_MAX_NORM)  # 在这里裁剪梯度
-            clipped_grads.append(clipped_grad)
-        else:
-            clipped_grads.append(None)
-
-    for grad, var in zip(clipped_grads, model.trainable_variables):
-        if grad is not None:
-            if hasattr(var, "path"):
-                # path is available in TF 2.13+
-                if "sparse_embedding" in var.path and "embeddings" in var.name:
-                    emb_grads.append((grad, var))
-                else:
-                    other_grads.append((grad, var))
-            else:
-                if "sparse_embedding" in var.name:
-                    emb_grads.append((grad, var))
-                else:
-                    other_grads.append((grad, var))
-
-    embedding_optimizer.apply_gradients(emb_grads)
-    other_optimizer.apply_gradients(other_grads)
-
+    optimizer.apply_gradients(zip(grads, model.trainable_variables))
     return loss
 
 
 ####################################################################################################
 #                                           TRAINING LOOP                                          #
 ####################################################################################################
-step = 0
-embedding_lr_metric = tf.keras.metrics.Mean()
-other_lr_metric = tf.keras.metrics.Mean()
+global_step = 0
+total_steps_per_epoch = 39291958 // BATCH_SIZE
 
 for epoch in range(TRAIN_EPOCHS):
     logger.info(f"Starting Epoch {epoch+1}/{TRAIN_EPOCHS}")
-
     for batch_idx, (inputs, labels) in enumerate(train_dataset):
         labels = tf.cast(labels, tf.float32)
+        train_loss = train_step(inputs, labels)
 
-        loss = train_step(inputs, labels)
-        current_lr = lr_schedule(step)
-
+        # Log training progress
         if (batch_idx + 1) % LOGGER_PRINT_INTERVAL == 0:
             logger.info(
                 f"Epoch [{epoch+1}/{TRAIN_EPOCHS}], "
-                f"Batch [{batch_idx+1}/{TOTAL_STEPS_PER_EPOCH}], "
-                f"Loss: {loss.numpy():.4f}, "
-                f"LR: {current_lr.numpy():.6f}"
+                f"Batch [{batch_idx+1}/{total_steps_per_epoch}], "
+                f"Train Loss: {train_loss.numpy():.4f}"
             )
-
+        # Write TensorBoard summary
         with summary_writer.as_default():
-            tf.summary.scalar("training_loss", loss, step=step)
-            tf.summary.scalar("optimizer_lr", current_lr, step=step)
+            tf.summary.scalar("training_loss", train_loss, step=global_step)
+        global_step += 1
 
-        step += 1
-
-    accuracy, num_samples, recall_pos, pos_samples = validate(model, valid_dataset)
-
+    # Validation after each epoch
+    val_logloss, val_auc, val_samples = validate(model, valid_dataset)
     logger.info(
         f"Validation after Epoch {epoch+1}: "
-        f"Accuracy: {accuracy*100:.2f}%, "
-        f"Total Samples: {num_samples}, "
-        f"Positive Recall: {recall_pos*100:.2f}%, "
-        f"Positive Samples: {pos_samples}"
+        f"Val Logloss: {val_logloss:.4f}, "
+        f"Val AUC: {val_auc:.4f}, "
+        f"Total Val Samples: {val_samples}"
     )
-
+    # Write validation metrics to TensorBoard
     with summary_writer.as_default():
-        tf.summary.scalar("validation_accuracy", accuracy, step=epoch + 1)
-        tf.summary.scalar("validation_recall_pos", recall_pos, step=epoch + 1)
+        tf.summary.scalar("validation_logloss", val_logloss, step=epoch + 1)
+        tf.summary.scalar("validation_auc", val_auc, step=epoch + 1)
 
+    # Save checkpoint if enabled
     if SAVE_CHECKPOINTS:
-        ckpt_path = os.path.join(checkpoint_dir, f"wukong_epoch_{epoch+1}")
+        ckpt_path = os.path.join(checkpoint_dir, f"deepfm_epoch_{epoch+1}")
         model.save_weights(ckpt_path)
         logger.info(f"Model checkpoint saved for epoch {epoch+1} at {ckpt_path}")

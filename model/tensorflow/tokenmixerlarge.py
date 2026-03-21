@@ -2,8 +2,8 @@ from typing import List
 import tensorflow as tf
 from tensorflow.keras import layers
 
-from model.tensorflow.embedding import Embedding
 from model.tensorflow.mlp import MLP
+from model.tensorflow.embedding import Embedding
 
 
 class RMSNorm(layers.Layer):
@@ -238,11 +238,9 @@ class TokenMixerLarge(tf.keras.Model):
         self.dim_emb = dim_emb
         self.dim_input_dense = dim_input_dense
         self.dim_input_sparse = dim_input_sparse
-        self.tokenizer = SemanticTokenizer(group_dims, dim_emb, bias, dropout)
-
+        self.num_layers = num_layers
         self.tokenizer = SemanticTokenizer(group_dims, dim_emb, bias, dropout)
         num_tokens = len(group_dims) + 1
-
         self.blocks = [
             TokenMixerLargeBlock(
                 dim_emb, num_heads, num_tokens, num_experts, top_k, bias=bias
@@ -257,8 +255,9 @@ class TokenMixerLarge(tf.keras.Model):
             dropout,
             bias,
         )
+        self.aux_head = layers.Dense(dim_output, use_bias=bias)
 
-    def call(self, inputs):
+    def call(self, inputs, training=False):
         sparse_inputs, dense_inputs = inputs
         x = self.embedding(sparse_inputs, dense_inputs)
         x = self.tokenizer(
@@ -273,15 +272,18 @@ class TokenMixerLarge(tf.keras.Model):
                 ],
             ]
         )
+        is_last_layer = self.num_layers - 1
         residual_cache = []
         for i, layer in enumerate(self.blocks):
             x = layer(x)
-
-            if i % 2 == 1:
+            if i % 2 == 1 and i != is_last_layer:
                 x = x + residual_cache[-1]
                 residual_cache = []
-
             residual_cache.append(x)
+            if training and i < is_last_layer and i % 2 == 1:
+                aux_pooled = tf.reduce_mean(x, axis=1)
+                aux_logit = self.aux_head(aux_pooled)
+                self.add_loss(tf.reduce_mean(tf.square(aux_logit)))
         x = tf.reduce_mean(x, axis=1)
         x = self.projection_head(x)
         return x
@@ -321,6 +323,7 @@ if __name__ == "__main__":
     ]
     DIM_INPUT_SPARSE = 26
     DIM_INPUT_DENSE = 13
+
     # Example usage
     model = TokenMixerLarge(
         group_dims=[[128] * 26, [128] * 13],
@@ -348,5 +351,13 @@ if __name__ == "__main__":
     dense_inputs = tf.constant(
         np.random.rand(BATCH_SIZE, DIM_INPUT_DENSE).astype(np.float32)
     )
+
     outputs = model((sparse_inputs, dense_inputs))
-    print("Model output shape:", outputs.shape)
+
+    # 根据是否有辅助输出处理打印逻辑
+    if isinstance(outputs, tuple):
+        main_out, aux_outs = outputs
+        print("Model main output shape:", main_out.shape)
+        print(f"Number of auxiliary outputs: {len(aux_outs)}")
+    else:
+        print("Model output shape:", outputs.shape)

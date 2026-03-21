@@ -93,7 +93,7 @@ DIM_OUTPUT = 1
 ####################################################################################################
 #                                   MODEL SPECIFIC CONFIGURATION                                   #
 ####################################################################################################
-NUM_LAYERS = 6  # number of Wukong layers
+NUM_LAYERS = 6  # number of layers
 DIM_EMB = 128  # dimension of embeddings
 NUM_TOKENS = 16  # number of tokens after semantic tokenization (T in the paper)
 NUM_HEADS = (
@@ -295,6 +295,6 @@ for epoch in range(TRAIN_EPOCHS):
         tf.summary.scalar("validation_recall_pos", recall_pos, step=epoch + 1)
 
     if SAVE_CHECKPOINTS:
-        ckpt_path = os.path.join(checkpoint_dir, f"wukong_epoch_{epoch+1}")
+        ckpt_path = os.path.join(checkpoint_dir, f"rankmixer_epoch_{epoch+1}")
         model.save_weights(ckpt_path)
         logger.info(f"Model checkpoint saved for epoch {epoch+1} at {ckpt_path}")

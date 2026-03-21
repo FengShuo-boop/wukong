@@ -92,22 +92,16 @@ NUM_SPARSE_EMBS = [
 ####################################################################################################
 #                                   MODEL SPECIFIC CONFIGURATION                                   #
 ####################################################################################################
-NUM_LAYERS = 2  # number of Wukong layers
 DIM_EMB = 128  # dimension of embeddings
-DROPOUT = 0.5  # dropout rate
-BIAS = False  # whether to use bias terms in the model
 
 ####################################################################################################
 #                                           CREATE MODEL                                           #
 ####################################################################################################
 model = FwFM(
-    num_layers=NUM_LAYERS,
     num_sparse_embs=NUM_SPARSE_EMBS,
     dim_input_sparse=NUM_CAT_FEATURES,
     dim_input_dense=NUM_DENSE_FEATURES,
     dim_emb=DIM_EMB,
-    dropout=DROPOUT,
-    bias=BIAS,
 )
 
 ####################################################################################################
@@ -281,6 +275,6 @@ for epoch in range(TRAIN_EPOCHS):
         tf.summary.scalar("validation_recall_pos", recall_pos, step=epoch + 1)
 
     if SAVE_CHECKPOINTS:
-        ckpt_path = os.path.join(checkpoint_dir, f"wukong_epoch_{epoch+1}")
+        ckpt_path = os.path.join(checkpoint_dir, f"fwfm_epoch_{epoch+1}")
         model.save_weights(ckpt_path)
         logger.info(f"Model checkpoint saved for epoch {epoch+1} at {ckpt_path}")

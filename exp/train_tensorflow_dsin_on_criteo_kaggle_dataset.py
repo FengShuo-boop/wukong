@@ -221,16 +221,7 @@ def train_step(inputs, labels):
     emb_grads = []
     other_grads = []
 
-    # 梯度裁剪
-    clipped_grads = []
-    for grad in grads:
-        if grad is not None:
-            clipped_grad = tf.clip_by_norm(grad, GRAD_MAX_NORM)  # 在这里裁剪梯度
-            clipped_grads.append(clipped_grad)
-        else:
-            clipped_grads.append(None)
-
-    for grad, var in zip(clipped_grads, model.trainable_variables):
+    for grad, var in zip(grads, model.trainable_variables):
         if grad is not None:
             if hasattr(var, "path"):
                 # path is available in TF 2.13+
@@ -243,7 +234,6 @@ def train_step(inputs, labels):
                     emb_grads.append((grad, var))
                 else:
                     other_grads.append((grad, var))
-
     embedding_optimizer.apply_gradients(emb_grads)
     other_optimizer.apply_gradients(other_grads)
 
@@ -295,6 +285,6 @@ for epoch in range(TRAIN_EPOCHS):
         tf.summary.scalar("validation_recall_pos", recall_pos, step=epoch + 1)
 
     if SAVE_CHECKPOINTS:
-        ckpt_path = os.path.join(checkpoint_dir, f"wukong_epoch_{epoch+1}")
+        ckpt_path = os.path.join(checkpoint_dir, f"dsin_epoch_{epoch+1}")
         model.save_weights(ckpt_path)
         logger.info(f"Model checkpoint saved for epoch {epoch+1} at {ckpt_path}")
